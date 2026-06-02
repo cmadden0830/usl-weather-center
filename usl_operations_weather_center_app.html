@@ -16,14 +16,21 @@ input,select{width:100%;background:#0b1729;color:var(--text);border:1px solid va
 .card{background:linear-gradient(180deg,rgba(19,36,61,.96),rgba(10,21,38,.96));border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 45px rgba(0,0,0,.23)}
 .metric{padding:18px}.metric .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.metric .num{font-size:32px;font-weight:800;margin-top:8px}.metric .hint{color:var(--muted);font-size:12px;margin-top:4px}
 .layout{grid-template-columns:1.35fr .8fr;margin-top:16px}.section-title{padding:16px 16px 0;font-weight:800;display:flex;justify-content:space-between;gap:10px;align-items:center}
-.map{height:430px;margin:16px;border-radius:16px;border:1px solid var(--line);background:linear-gradient(90deg,rgba(56,189,248,.06) 1px,transparent 1px),linear-gradient(rgba(56,189,248,.05) 1px,transparent 1px),radial-gradient(circle at 18% 35%,rgba(34,197,94,.11),transparent 16%),radial-gradient(circle at 65% 30%,rgba(239,68,68,.13),transparent 13%),radial-gradient(circle at 75% 68%,rgba(245,158,11,.13),transparent 15%),#081426;background-size:40px 40px,40px 40px,auto,auto,auto,auto;position:relative;overflow:hidden}
-.marker{position:absolute;transform:translate(-50%,-50%);border:none;border-radius:999px;width:14px;height:14px;cursor:pointer;box-shadow:0 0 0 5px rgba(255,255,255,.08),0 0 22px currentColor}.marker.High{background:var(--red);color:var(--red)}.marker.Moderate{background:var(--yellow);color:var(--yellow)}.marker.Low{background:var(--green);color:var(--green)}.marker:hover{width:22px;height:22px}.map-label{position:absolute;bottom:14px;left:16px;color:#cbd5e1;font-size:12px}
+.map{height:430px;margin:16px;border-radius:16px;border:1px solid var(--line);background:#081426;position:relative;overflow:hidden}
+.marker{position:absolute;z-index:3;transform:translate(-50%,-50%);border:none;border-radius:999px;width:14px;height:14px;cursor:pointer;box-shadow:0 0 0 5px rgba(255,255,255,.08),0 0 22px currentColor}.marker.High{background:var(--red);color:var(--red)}.marker.Moderate{background:var(--yellow);color:var(--yellow)}.marker.Low{background:var(--green);color:var(--green)}.marker:hover{width:22px;height:22px}.map-label{position:absolute;z-index:4;bottom:14px;left:16px;color:#cbd5e1;font-size:12px}
 .high-list{padding:12px 16px 16px;display:flex;flex-direction:column;gap:10px;max-height:430px;overflow:auto}.risk-item{padding:13px;border:1px solid var(--line);background:#0b1729;border-radius:14px;cursor:pointer}.risk-item:hover{border-color:#48617f}.match{font-weight:800;font-size:14px}.meta{color:var(--muted);font-size:12px;margin-top:5px}
 .pill{border-radius:999px;padding:4px 9px;font-weight:800;font-size:11px;display:inline-block}.pill.High{background:rgba(239,68,68,.18);color:#fecaca;border:1px solid rgba(239,68,68,.45)}.pill.Moderate{background:rgba(245,158,11,.18);color:#fde68a;border:1px solid rgba(245,158,11,.45)}.pill.Low{background:rgba(34,197,94,.18);color:#bbf7d0;border:1px solid rgba(34,197,94,.45)}
 .table-wrap{margin-top:16px;overflow:auto}table{width:100%;border-collapse:separate;border-spacing:0;min-width:1120px}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px}th{color:#cbd5e1;background:#0b1729;position:sticky;top:0}tr:hover td{background:rgba(56,189,248,.04);cursor:pointer}
 .detail-layout{grid-template-columns:1fr 1fr;margin-top:16px}.detail{padding:16px;min-height:330px}.detail h2{margin:0 0 8px;font-size:20px}.threats{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.rec{border-left:4px solid var(--blue);background:#0b1729;padding:12px;border-radius:10px;margin-top:10px;color:#dbeafe}
 .timeline{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-top:12px}.hour{background:#0b1729;border:1px solid var(--line);border-radius:12px;padding:10px;font-size:12px}.hour strong{display:block;font-size:13px;margin-bottom:5px}canvas{max-height:290px;padding:10px}
 @media(max-width:1150px){.filters,.summary,.layout,.detail-layout{grid-template-columns:1fr} header{flex-direction:column}}
+
+.us-map-svg{position:absolute;inset:0;width:100%;height:100%;opacity:.95}
+.us-land{fill:#0d2139;stroke:#5a7599;stroke-width:1.7}
+.state-line{stroke:#2f4967;stroke-width:.85;fill:none;opacity:.9}
+.map-graticule{stroke:#1b314d;stroke-width:.5;opacity:.6}
+.map-glow{filter:drop-shadow(0 0 18px rgba(56,189,248,.12))}
+
 </style>
 </head>
 <body>
@@ -43,7 +50,70 @@ input,select{width:100%;background:#0b1729;color:var(--text);border:1px solid va
   </div>
   <section class="grid summary" id="summary"></section>
   <section class="grid layout">
-    <div class="card"><div class="section-title">Interactive Match Risk Map <span class="badge">Click marker for detail</span></div><div class="map" id="map"><div class="map-label">Conceptual US map. Production version can swap to Mapbox or Leaflet.</div></div></div>
+    <div class="card"><div class="section-title">Interactive Match Risk Map <span class="badge">Click marker for detail</span></div><div class="map" id="map">
+<svg class="us-map-svg map-glow" viewBox="0 0 1000 560" preserveAspectRatio="xMidYMid meet" aria-label="United States map outline">
+  <defs>
+    <linearGradient id="landGrad" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#102b49"/>
+      <stop offset="100%" stop-color="#0a1729"/>
+    </linearGradient>
+  </defs>
+  <g opacity=".45">
+    <path class="map-graticule" d="M80 120H925M80 190H925M80 260H925M80 330H925M80 400H925M80 470H925"/>
+    <path class="map-graticule" d="M130 70V505M220 70V505M310 70V505M400 70V505M490 70V505M580 70V505M670 70V505M760 70V505M850 70V505"/>
+  </g>
+
+  <!-- Approximate contiguous United States outline, designed for operations-dashboard context -->
+  <path class="us-land" fill="url(#landGrad)" d="
+    M105,205
+    L130,170 L170,155 L220,145 L260,120 L315,112 L365,105 L415,112
+    L475,118 L535,112 L595,118 L660,128 L720,138 L780,145 L835,160
+    L878,178 L902,205 L890,235 L912,260 L895,292 L915,324 L885,355
+    L875,390 L840,405 L800,402 L770,420 L735,415 L690,432 L650,448
+    L610,440 L565,454 L520,446 L480,462 L430,450 L392,430 L350,425
+    L318,405 L280,408 L245,392 L208,390 L178,368 L155,342 L145,305
+    L120,282 L105,245 Z" />
+
+  <!-- Pacific coast / western interior -->
+  <path class="state-line" d="M150 166 L142 215 L132 268 L150 335 L182 380"/>
+  <path class="state-line" d="M205 150 L190 215 L180 280 L205 390"/>
+  <path class="state-line" d="M260 122 L245 190 L238 260 L250 395"/>
+  <path class="state-line" d="M315 112 L300 182 L300 255 L318 405"/>
+  <path class="state-line" d="M365 106 L360 175 L360 250 L350 425"/>
+  <path class="state-line" d="M415 112 L410 180 L410 255 L392 430"/>
+
+  <!-- Rockies / Plains -->
+  <path class="state-line" d="M475 118 L470 185 L475 255 L480 462"/>
+  <path class="state-line" d="M535 112 L535 185 L540 255 L520 446"/>
+  <path class="state-line" d="M595 118 L590 190 L595 260 L610 440"/>
+  <path class="state-line" d="M660 128 L650 200 L650 280 L650 448"/>
+
+  <!-- Midwest / East -->
+  <path class="state-line" d="M720 138 L705 210 L710 285 L690 432"/>
+  <path class="state-line" d="M780 145 L760 220 L765 300 L735 415"/>
+  <path class="state-line" d="M835 160 L810 225 L820 305 L800 402"/>
+  <path class="state-line" d="M878 178 L850 238 L865 315 L840 405"/>
+
+  <!-- Horizontal state bands -->
+  <path class="state-line" d="M130 205 L890 205"/>
+  <path class="state-line" d="M112 245 L904 245"/>
+  <path class="state-line" d="M122 285 L900 285"/>
+  <path class="state-line" d="M142 325 L895 325"/>
+  <path class="state-line" d="M162 365 L875 365"/>
+  <path class="state-line" d="M205 405 L805 405"/>
+
+  <!-- Great Lakes impression -->
+  <path class="state-line" d="M705 165 C735 145,765 152,788 172 C765 188,730 188,705 165"/>
+  <path class="state-line" d="M770 190 C810 170,848 185,870 215 C830 222,800 214,770 190"/>
+  <path class="state-line" d="M690 205 C715 195,740 205,755 230 C720 238,700 228,690 205"/>
+
+  <!-- Florida / Gulf / Northeast emphasis -->
+  <path class="state-line" d="M765 405 C790 430,805 462,800 505 C770 478,745 445,735 415"/>
+  <path class="state-line" d="M840 178 C880 180,910 205,925 245"/>
+  <path class="state-line" d="M825 250 C855 255,885 278,905 314"/>
+  <path class="state-line" d="M610 440 C655 425,700 420,735 415"/>
+</svg>
+<div class="map-label">Conceptual US map. Production version can swap to Mapbox or Leaflet.</div></div></div>
     <div class="card"><div class="section-title">High / Moderate Risk Watchlist</div><div class="high-list" id="highList"></div></div>
   </section>
   <section class="card table-wrap"><div class="section-title">Full Match Schedule <span class="badge" id="countLabel"></span></div><table><thead><tr><th>Date</th><th>League</th><th>Match</th><th>Venue</th><th>Temp</th><th>Wind</th><th>Rain</th><th>Lightning</th><th>Risk</th><th>Source</th></tr></thead><tbody id="tbody"></tbody></table></section>
