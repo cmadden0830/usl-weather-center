@@ -74,9 +74,25 @@ function renderMap(a){const map=document.getElementById("map");map.querySelector
 function renderHigh(a){const risk=a.filter(m=>m.risk.riskLevel!=="Low").slice(0,70);document.getElementById("highList").innerHTML=risk.length?risk.map(m=>`<div class="risk-item" onclick="selectedId='${m.id}';render()"><div style="display:flex;justify-content:space-between;gap:10px"><div class="match">${m.homeTeam} vs ${m.awayTeam}</div><span class="pill ${m.risk.riskLevel}">${m.risk.score}</span></div><div class="meta">${m.date||"TBD"} ${m.time||""} • ${m.city||""}, ${m.state||""}</div><div class="meta">Primary threat: <b>${m.risk.primaryThreat}</b></div><div class="meta">Forecast: ${m.weather.temperature}°F, rain ${m.weather.rainProbability}%, gusts ${m.weather.windGust} mph</div></div>`).join(""):'<div class="meta">No red or yellow matches in this view.</div>'}
 function renderTable(a){const lim=document.getElementById("limit").value;const shown=lim==="all"?a:a.slice(0,Number(lim));document.getElementById("countLabel").textContent=`Showing ${shown.length} of ${a.length} filtered • ${matches.length} total embedded`;document.getElementById("tbody").innerHTML=shown.map(m=>`<tr onclick="selectedId='${m.id}';render()"><td>${m.date||"TBD"}<br><span class="meta">${m.time||""}</span></td><td>${m.league}</td><td><b>${m.homeTeam}</b><br><span class="meta">vs ${m.awayTeam}</span></td><td>${m.venue||"Venue TBD"}<br><span class="meta">${m.city||""}${m.state?", "+m.state:""}</span></td><td>${m.weather.temperature}°F<br><span class="meta">Feels ${m.weather.feelsLike}°</span></td><td>${m.weather.windSpeed} mph<br><span class="meta">Gust ${m.weather.windGust}</span></td><td>${m.weather.rainProbability}%</td><td>${m.weather.lightningRisk}%</td><td><span class="pill ${m.risk.riskLevel}">${m.risk.riskLevel} ${m.risk.score}</span></td><td>${m.source}</td></tr>`).join("")}
 function renderDetail(){const m=matches.find(x=>x.id===selectedId)||matches[0];if(!m)return;const hours=["-6h","-4h","-2h","KO","+1h","+3h"].map((h,i)=>`<div class="hour"><strong>${h}</strong>${m.weather.temperature+i-2}°F<br>Wind ${Math.max(1,m.weather.windSpeed+i-2)}<br>Rain ${Math.min(100,Math.max(0,m.weather.rainProbability+i*2-5))}%<br>AQI ${m.weather.aqi}</div>`).join("");document.getElementById("detail").innerHTML=`<h2>${m.homeTeam} vs ${m.awayTeam}</h2><div class="meta">${m.league} • ${m.date||"TBD"} ${m.time||""} • ${m.venue||"Venue TBD"}, ${m.city||""} ${m.state||""}</div><div class="threats"><span class="pill ${m.risk.riskLevel}">${m.risk.riskLevel} Risk • ${m.risk.score}</span>${m.risk.threats.map(t=>`<span class="badge">${t}</span>`).join("")||'<span class="badge">No major threats</span>'}</div><div class="meta">Forecast window: 6 hours before kickoff through 3 hours after match. Lat/Lon: ${Number(m.latitude).toFixed(3)}, ${Number(m.longitude).toFixed(3)}</div><div class="timeline">${hours}</div><h3>Operational Recommendations</h3>${recommendation(m).map(x=>`<div class="rec">${x}</div>`).join("")}`}
-function renderChart(a){const ctx=document.getElementById("chart"),leagues=[...new Set(a.map(m=>m.league))].slice(0,8);const data=leagues.map(l=>{const x=a.filter(m=>m.league===l);return Math.round(x.reduce((s,m)=>s+m.risk.score,0)/(x.length||1))});if(chart)chart.destroy();chart=new Chart(ctx,{type:"bar",data:{labels:leagues,datasets:[{label:"Avg Risk Score",data:data}]},options:{responsive:true,plugins:{legend:{labels:{color:"#cbd5e1"}}},scales:{x:{ticks:{color:"#cbd5e1"},grid:{color:"#263852"}},y:{ticks:{color:"#cbd5e1"},grid:{color:"#263852"},suggestedMax:100}}}})}
+function renderChart(a){
+  const canvas=document.getElementById("chart");
+  const box=canvas.parentElement;
+  const leagues=[...new Set(a.map(m=>m.league))].slice(0,8);
+  const data=leagues.map(l=>{const x=a.filter(m=>m.league===l);return Math.round(x.reduce((s,m)=>s+m.risk.score,0)/(x.length||1))});
+  if(typeof Chart === "undefined"){
+    canvas.style.display="none";
+    let fallback=document.getElementById("chartFallback");
+    if(!fallback){fallback=document.createElement("div");fallback.id="chartFallback";box.appendChild(fallback);}
+    fallback.innerHTML=leagues.map((l,i)=>`<div style="margin:10px 0"><div class="meta">${l}: ${data[i]}</div><div style="height:12px;background:#0b1729;border:1px solid #263852;border-radius:999px;overflow:hidden"><div style="height:100%;width:${Math.min(100,data[i])}%;background:#38bdf8"></div></div></div>`).join("");
+    return;
+  }
+  canvas.style.display="block";
+  const old=document.getElementById("chartFallback"); if(old) old.remove();
+  if(chart)chart.destroy();
+  chart=new Chart(canvas,{type:"bar",data:{labels:leagues,datasets:[{label:"Avg Risk Score",data:data}]},options:{responsive:true,plugins:{legend:{labels:{color:"#cbd5e1"}}},scales:{x:{ticks:{color:"#cbd5e1"},grid:{color:"#263852"}},y:{ticks:{color:"#cbd5e1"},grid:{color:"#263852"},suggestedMax:100}}}})
+}
 function render(){const a=filtered();summary(a);renderMap(a);renderHigh(a);renderTable(a);renderDetail();renderChart(a)}
-hydrateFilters(); render();
+try { hydrateFilters(); render(); } catch (err) { document.body.innerHTML = `<div style="font-family:Arial;padding:24px;background:#07111f;color:white;min-height:100vh"><h1>Dashboard load error</h1><p>${err.message}</p><p>Open browser Developer Tools Console for details.</p></div>`; console.error(err); }
 </script>
 </body>
 </html>
