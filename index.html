@@ -1,1301 +1,80 @@
-# USL Weather Risks - Copy/Paste into GitHub
-
-Create these files in a new GitHub repo using the exact paths shown below. For `.env.example`, create the file as shown, then copy it to `.env` locally and replace the email in `NWS_USER_AGENT`.
-
-## File tree
-
-```text
-usl-weather-risks/
-├── .gitignore
-├── .env.example
-├── package.json
-├── README.md
-├── server.js
-├── src/
-│   ├── config.js
-│   ├── cache.js
-│   ├── schedule.js
-│   └── weather.js
-├── public/
-│   ├── index.html
-│   ├── styles.css
-│   └── app.js
-└── data/
-    ├── team-aliases.json
-    └── venue-cache.json
-```
-
-## `.gitignore`
-
-`````gitignore
-node_modules/
-.env
-.DS_Store
-npm-debug.log*
-coverage/
-.playwright/
-.cache/
-
-`````
-
-## `.env.example`
-
-`````bash
-# Required by api.weather.gov. Include a site or email NWS can contact.
-NWS_USER_AGENT="USLWeatherOpsDashboard/1.0 (ops@example.com)"
-
-# Enable Playwright schedule rendering for official USL pages. Recommended for SportsEngine/JS schedule pages.
-ENABLE_PLAYWRIGHT=true
-
-# Cache TTLs in milliseconds.
-SCHEDULE_CACHE_MS=900000
-WEATHER_CACHE_MS=300000
-SPC_CACHE_MS=600000
-
-# Optional: Express port.
-PORT=3000
-
-`````
-
-## `package.json`
-
-`````json
-{
-  "name": "usl-weather-risk-dashboard",
-  "version": "1.0.0",
-  "description": "Interactive live USL match weather risk dashboard using official USL schedules plus NOAA/NWS/SPC data.",
-  "type": "module",
-  "private": true,
-  "scripts": {
-    "start": "node server.js",
-    "dev": "NODE_ENV=development node --watch server.js",
-    "install:browsers": "npx playwright install chromium"
-  },
-  "dependencies": {
-    "cheerio": "^1.0.0",
-    "express": "^4.19.2",
-    "playwright": "^1.45.3"
-  },
-  "engines": {
-    "node": ">=20"
-  }
-}
-
-`````
-
-## `README.md`
-
-`````markdown
-# USL Match Weather Operations Dashboard
-
-Interactive live web dashboard for USL match-weather operations. It pulls official USL schedule pages, matches home teams to venue coordinates, retrieves NOAA/NWS forecasts and active alerts, overlays SPC Day 1-3 categorical severe-weather outlooks, then renders a risk table, elevated-risk operations panel, and recommended league actions.
-
-## What it pulls
-
-- Official schedule pages:
-  - USL Championship: `https://www.uslchampionship.com/league-schedule`
-  - USL League One: `https://www.uslleagueone.com/League-Schedule`
-  - USL Super League / Gainbridge Super League: `https://www.gainbridgesuperleague.com/league-schedule/`
-- NWS forecast and alert data:
-  - `https://api.weather.gov/points/{lat},{lon}`
-  - `forecastHourly`, `forecast`, `forecastGridData`
-  - `https://api.weather.gov/alerts/active?point={lat},{lon}`
-- SPC categorical outlook GeoJSON:
-  - `https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson`
-  - `https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson`
-  - `https://www.spc.noaa.gov/products/outlook/day3otlk_cat.nolyr.geojson`
-
-## Why the backend is required
-
-The browser should not directly scrape schedule sites or call every weather endpoint. The Node/Express backend handles CORS, schedule rendering, caching, NWS user-agent requirements, data joins, risk scoring, and rate limiting.
-
-## Install
-
-```bash
-npm install
-cp .env.example .env
-# Edit .env and put a real contact email/site in NWS_USER_AGENT.
-npm run install:browsers
-npm start
-```
-
-Open `http://localhost:3000`.
-
-## Operational setup notes
-
-1. **Set `NWS_USER_AGENT`** to a real app identifier and contact email/site. NWS asks API users to identify themselves.
-2. **Keep `ENABLE_PLAYWRIGHT=true`** for official USL schedule pages. USL/SportsEngine schedule widgets are often client-rendered; Playwright lets the backend read the rendered schedule text.
-3. **Audit `data/venue-cache.json`** before operational use. Some entries are venue-precise; some are clearly marked `approximate` or `city-fallback`. Replace any approximate coordinate with validated venue coordinates.
-4. **Tune parsing if USL markup changes.** Schedule widgets change over time. The app records `sourceWarnings` when no fixtures are parsed for a league/window.
-5. **Cache responsibly.** Defaults: schedules 15 minutes, NWS 5 minutes, SPC 10 minutes. Adjust in `.env` for your operations cadence.
-
-## API
-
-### `GET /api/dashboard`
-
-Query parameters:
-
-- `window=tonight|today|weekend` — default is `weekend`.
-- `from=<ISO datetime>&to=<ISO datetime>` — custom window.
-- `refresh=true` — bypasses the app cache.
-
-Example:
-
-```bash
-curl 'http://localhost:3000/api/dashboard?window=tonight&refresh=true'
-```
-
-### `POST /api/cache/clear`
-
-```bash
-curl -X POST 'http://localhost:3000/api/cache/clear'
-```
-
-## Risk scoring model
-
-The risk engine is deliberately transparent rather than black-box. It assigns points for:
-
-- active NWS warnings/watches/advisories,
-- thunderstorm/lightning wording in the NWS hourly forecast window,
-- precipitation probability and heavy-rain/flood wording,
-- SPC categorical outlook overlap at the venue point,
-- heat/applicable apparent-temperature signal,
-- wind/gust signal.
-
-Risk levels:
-
-- `Critical`: score >= 85
-- `High`: score >= 60
-- `Moderate`: score >= 30
-- `Low`: score < 30
-- `Unknown`: insufficient venue/weather data
-
-## Radar
-
-`api.weather.gov` does not provide radar imagery for display. The app links operators to the public NWS radar site. For automated radar trend analytics, extend the backend with NWS OGC/RIDGE2 or MRMS feeds.
-
-## Files to customize
-
-- `data/venue-cache.json`: home team venue coordinates and precision tags.
-- `data/team-aliases.json`: team-name variants used by the schedule parser.
-- `src/weather.js`: risk-scoring thresholds and recommended actions.
-- `src/schedule.js`: schedule parser and official source handling.
-
-`````
-
-## `server.js`
-
-`````javascript
-import express from 'express';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { APP } from './src/config.js';
-import { clearCache } from './src/cache.js';
-import { getOfficialMatches } from './src/schedule.js';
-import { assessMatches, buildSummary } from './src/weather.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
-
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
-function bool(value) {
-  return ['1', 'true', 'yes', 'y'].includes(String(value || '').toLowerCase());
-}
-
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true, generatedAt: new Date().toISOString(), cache: APP.cache, playwrightEnabled: APP.enablePlaywright });
-});
-
-app.get('/api/dashboard', async (req, res) => {
-  try {
-    const force = bool(req.query.refresh);
-    const schedule = await getOfficialMatches({
-      window: req.query.window || 'weekend',
-      from: req.query.from,
-      to: req.query.to,
-      force
-    });
-    const assessed = await assessMatches(schedule.matches, { force });
-    const summary = buildSummary(assessed.matches);
-
-    res.json({
-      generatedAt: new Date().toISOString(),
-      window: schedule.window,
-      summary,
-      matches: assessed.matches,
-      sources: schedule.sources,
-      sourceWarnings: [...(schedule.warnings || []), ...(assessed.warnings || [])]
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message, generatedAt: new Date().toISOString() });
-  }
-});
-
-app.post('/api/cache/clear', (req, res) => {
-  const prefix = req.body?.prefix || req.query.prefix || '';
-  const cleared = clearCache(prefix);
-  res.json({ ok: true, cleared });
-});
-
-app.listen(APP.port, () => {
-  console.log(`USL Weather Risk Dashboard running at http://localhost:${APP.port}`);
-});
-
-`````
-
-## `src/config.js`
-
-`````javascript
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, '..');
-
-export const APP = {
-  root,
-  port: Number(process.env.PORT || 3000),
-  nwsUserAgent: process.env.NWS_USER_AGENT || 'USLWeatherOpsDashboard/1.0 (set NWS_USER_AGENT with contact email)',
-  enablePlaywright: String(process.env.ENABLE_PLAYWRIGHT || 'true').toLowerCase() === 'true',
-  cache: {
-    scheduleMs: Number(process.env.SCHEDULE_CACHE_MS || 15 * 60 * 1000),
-    weatherMs: Number(process.env.WEATHER_CACHE_MS || 5 * 60 * 1000),
-    spcMs: Number(process.env.SPC_CACHE_MS || 10 * 60 * 1000)
-  }
-};
-
-export const LEAGUE_SOURCES = [
-  {
-    id: 'uslc',
-    league: 'USL Championship',
-    officialUrl: 'https://www.uslchampionship.com/league-schedule',
-    domain: 'uslchampionship.com',
-    parser: 'sportsengine'
-  },
-  {
-    id: 'usll1',
-    league: 'USL League One',
-    officialUrl: 'https://www.uslleagueone.com/League-Schedule',
-    domain: 'uslleagueone.com',
-    parser: 'sportsengine'
-  },
-  {
-    id: 'uslsl',
-    league: 'USL Super League',
-    officialUrl: 'https://www.gainbridgesuperleague.com/league-schedule/',
-    domain: 'gainbridgesuperleague.com',
-    parser: 'wordpress-sportsengine'
-  }
-];
-
-export const MONTH_INDEX = Object.freeze({
-  january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
-  july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
-});
-
-export const RISK_ORDER = Object.freeze({ Low: 1, Moderate: 2, High: 3, Critical: 4, Unknown: 0 });
-
-export async function loadJson(relativePath, fallback) {
-  try {
-    const text = await fs.readFile(path.join(root, relativePath), 'utf8');
-    return JSON.parse(text);
-  } catch (err) {
-    console.warn(`Could not load ${relativePath}: ${err.message}`);
-    return fallback;
-  }
-}
-
-export async function loadVenueCache() {
-  return loadJson('data/venue-cache.json', {});
-}
-
-export async function loadTeamAliases() {
-  return loadJson('data/team-aliases.json', []);
-}
-
-`````
-
-## `src/cache.js`
-
-`````javascript
-const store = new Map();
-
-export function getCache(key) {
-  const hit = store.get(key);
-  if (!hit) return null;
-  if (Date.now() > hit.expiresAt) {
-    store.delete(key);
-    return null;
-  }
-  return hit.value;
-}
-
-export function setCache(key, value, ttlMs) {
-  store.set(key, { value, expiresAt: Date.now() + ttlMs });
-  return value;
-}
-
-export function clearCache(prefix = '') {
-  let count = 0;
-  for (const key of store.keys()) {
-    if (!prefix || key.startsWith(prefix)) {
-      store.delete(key);
-      count += 1;
-    }
-  }
-  return count;
-}
-
-`````
-
-## `src/schedule.js`
-
-`````javascript
-import * as cheerio from 'cheerio';
-import { APP, LEAGUE_SOURCES, MONTH_INDEX, loadTeamAliases, loadVenueCache } from './config.js';
-import { getCache, setCache } from './cache.js';
-
-const USL_USER_AGENT = 'USLWeatherOpsDashboard/1.0 (+https://example.com)';
-
-const DAY_RE = /\b(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\b/i;
-const DATE_RE = /\b(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)?,?\s*(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:,?\s*(20\d{2}))?\b/i;
-const TIME_RE = /\b(1[0-2]|0?[1-9]):([0-5]\d)\s*(AM|PM|A\.M\.|P\.M\.)?\s*(ET|CT|MT|PT|EST|EDT|CST|CDT|MST|MDT|PST|PDT)?\b/i;
-
-const STATE_TZ = {
-  AL: 'America/Chicago', AZ: 'America/Phoenix', CA: 'America/Los_Angeles', CO: 'America/Denver', CT: 'America/New_York',
-  DC: 'America/New_York', FL: 'America/New_York', GA: 'America/New_York', ID: 'America/Boise', IL: 'America/Chicago',
-  IN: 'America/Indiana/Indianapolis', KY: 'America/New_York', ME: 'America/New_York', MI: 'America/Detroit', NC: 'America/New_York',
-  NE: 'America/Chicago', NJ: 'America/New_York', NM: 'America/Denver', NV: 'America/Los_Angeles', NY: 'America/New_York',
-  OK: 'America/Chicago', PA: 'America/New_York', RI: 'America/New_York', SC: 'America/New_York', TN: 'America/New_York',
-  TX: 'America/Chicago', VA: 'America/New_York', WA: 'America/Los_Angeles', WI: 'America/Chicago'
-};
-
-const TIME_ZONE_ABBR = {
-  ET: 'America/New_York', EST: 'America/New_York', EDT: 'America/New_York',
-  CT: 'America/Chicago', CST: 'America/Chicago', CDT: 'America/Chicago',
-  MT: 'America/Denver', MST: 'America/Denver', MDT: 'America/Denver',
-  PT: 'America/Los_Angeles', PST: 'America/Los_Angeles', PDT: 'America/Los_Angeles'
-};
-
-function normalizeSpaces(value = '') {
-  return String(value).replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s+\n/g, '\n').trim();
-}
-
-function strip(value = '') {
-  return normalizeSpaces(value).replace(/[|•]/g, ' ').trim();
-}
-
-function isNoise(line) {
-  if (!line) return true;
-  return /^(select a team|schedule by team|sync to calendar|where to watch|watch|tickets|odds|line:|privacy|login|search|menu|skip navigation)$/i.test(line)
-    || /sportsengine|powered by|copyright|newsletter|download the usl app|where to watch/i.test(line)
-    || line.length > 400;
-}
-
-function buildTeamMatcher(aliasRecords) {
-  const variants = [];
-  for (const rec of aliasRecords) {
-    for (const alias of rec.aliases || [rec.canonical]) {
-      variants.push({ canonical: rec.canonical, alias, rx: new RegExp(`\\b${escapeRegExp(alias)}\\b`, 'i') });
-    }
-  }
-  variants.sort((a, b) => b.alias.length - a.alias.length);
-  return variants;
-}
-
-function escapeRegExp(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function findTeams(text, variants) {
-  const hits = [];
-  const used = new Set();
-  for (const v of variants) {
-    const m = v.rx.exec(text);
-    if (!m || used.has(v.canonical)) continue;
-    hits.push({ canonical: v.canonical, alias: v.alias, index: m.index });
-    used.add(v.canonical);
-  }
-  return hits.sort((a, b) => a.index - b.index);
-}
-
-function findDate(text, defaultYear) {
-  const m = DATE_RE.exec(text);
-  if (!m) return null;
-  const month = MONTH_INDEX[m[1].toLowerCase()];
-  const day = Number(m[2]);
-  const year = Number(m[3] || defaultYear);
-  return { year, month, day, text: m[0].trim() };
-}
-
-function findTime(text) {
-  const m = TIME_RE.exec(text);
-  if (!m) return null;
-  let hour = Number(m[1]);
-  const minute = Number(m[2]);
-  const ampm = (m[3] || '').replace(/\./g, '').toUpperCase();
-  const zone = (m[4] || '').toUpperCase();
-  if (ampm === 'PM' && hour !== 12) hour += 12;
-  if (ampm === 'AM' && hour === 12) hour = 0;
-  return { hour, minute, zone, text: m[0].trim() };
-}
-
-function getOffsetMinutes(timeZone, date) {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hour12: false,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  });
-  const parts = Object.fromEntries(dtf.formatToParts(date).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
-  const asUTC = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
-  return (asUTC - date.getTime()) / 60000;
-}
-
-function zonedTimeToUtc({ year, month, day, hour, minute }, timeZone) {
-  const utcGuess = new Date(Date.UTC(year, month, day, hour, minute, 0));
-  const offset1 = getOffsetMinutes(timeZone, utcGuess);
-  const utc1 = new Date(utcGuess.getTime() - offset1 * 60000);
-  const offset2 = getOffsetMinutes(timeZone, utc1);
-  return new Date(utcGuess.getTime() - offset2 * 60000);
-}
-
-function stateTimezone(state) {
-  return STATE_TZ[String(state || '').toUpperCase()] || 'America/New_York';
-}
-
-function parseStartTime(dateParts, timeParts, venueRecord) {
-  const estimated = !timeParts;
-  const timeZone = timeParts?.zone ? TIME_ZONE_ABBR[timeParts.zone] || stateTimezone(venueRecord?.state) : stateTimezone(venueRecord?.state);
-  const hour = timeParts?.hour ?? 19;
-  const minute = timeParts?.minute ?? 0;
-  const utc = zonedTimeToUtc({ ...dateParts, hour, minute }, timeZone);
-  return {
-    startTime: utc.toISOString(),
-    timeText: timeParts?.text || '7:00 PM local (estimated)',
-    timezone: timeZone,
-    timeEstimated: estimated
-  };
-}
-
-function extractVenueCandidate(chunkLines, teams) {
-  const teamSet = new Set(teams.map(t => t.canonical));
-  const candidates = chunkLines
-    .map(strip)
-    .filter(line => line && !isNoise(line))
-    .filter(line => !DATE_RE.test(line) && !TIME_RE.test(line))
-    .filter(line => !/^(FT|FINAL|PPD|POSTPONED|TBD|TV|location|home|away|v|vs|at|\d+)$/.test(line))
-    .filter(line => !/^[0-9]+\s*v\s*[0-9]+$/i.test(line))
-    .filter(line => ![...teamSet].some(team => new RegExp(`\\b${escapeRegExp(team)}\\b`, 'i').test(line)));
-
-  const venueLike = candidates.find(line => /stadium|field|park|complex|center|centre|campus|bowl|arena|grounds|soccer/i.test(line));
-  return venueLike || candidates.find(line => line.length >= 4 && line.length <= 80) || null;
-}
-
-function lineDateMap(lines, defaultYear) {
-  const map = new Map();
-  let current = null;
-  lines.forEach((line, idx) => {
-    const d = findDate(line, defaultYear);
-    if (d) current = d;
-    if (current) map.set(idx, current);
-  });
-  return map;
-}
-
-function chunkHasMatchSeparator(chunk) {
-  return /\b(v|vs\.?|at)\b/i.test(chunk) || /\s[-–—]\s/.test(chunk);
-}
-
-function parseFixturesFromText({ text, source, aliasRecords, venueCache, from, to }) {
-  const variants = buildTeamMatcher(aliasRecords);
-  const defaultYear = from.getFullYear();
-  const rawLines = normalizeSpaces(text).split('\n').map(strip).filter(Boolean);
-  const lines = rawLines.filter(line => !isNoise(line));
-  const dates = lineDateMap(lines, defaultYear);
-  const dedupe = new Map();
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (!line || DATE_RE.test(line) || isNoise(line)) continue;
-    if (!findTeams(line, variants).length && !/\b(v|vs\.?|at)\b/i.test(line)) continue;
-
-    const start = Math.max(0, i - 3);
-    const end = Math.min(lines.length, i + 14);
-    const chunkLines = lines.slice(start, end);
-    const chunk = chunkLines.join(' | ');
-    if (/select a team|schedule by team/i.test(chunk)) continue;
-
-    const teams = findTeams(chunk, variants);
-    if (teams.length < 2 || teams.length > 6) continue;
-    if (!chunkHasMatchSeparator(chunk) && teams[1].index - teams[0].index > 160) continue;
-
-    const dateParts = findDate(chunk, defaultYear) || dates.get(i) || dates.get(start);
-    if (!dateParts) continue;
-
-    const homeTeam = teams[0].canonical;
-    const awayTeam = teams.find(t => t.canonical !== homeTeam)?.canonical;
-    if (!awayTeam || homeTeam === awayTeam) continue;
-
-    const homeVenue = venueCache[homeTeam] || null;
-    const timeParts = findTime(chunk);
-    const startInfo = parseStartTime(dateParts, timeParts, homeVenue);
-    const matchDateMs = Date.parse(startInfo.startTime);
-    if (Number.isFinite(matchDateMs)) {
-      const margin = 8 * 60 * 60 * 1000;
-      if (matchDateMs < from.getTime() - margin || matchDateMs > to.getTime() + margin) continue;
-    }
-
-    const status = /\b(FT|FINAL)\b/i.test(chunk) ? 'Final' : (/\b(PPD|POSTPONED)\b/i.test(chunk) ? 'Postponed' : 'Scheduled');
-    if (status === 'Final' && matchDateMs < Date.now() - 2 * 60 * 60 * 1000) continue;
-
-    const officialVenueText = extractVenueCandidate(chunkLines, teams);
-    const key = `${source.id}|${dateParts.year}-${dateParts.month + 1}-${dateParts.day}|${homeTeam}|${awayTeam}`;
-    if (dedupe.has(key)) continue;
-
-    const venue = {
-      venue: officialVenueText || homeVenue?.venue || null,
-      city: homeVenue?.city || null,
-      state: homeVenue?.state || null,
-      lat: homeVenue?.lat ?? null,
-      lon: homeVenue?.lon ?? null,
-      precision: homeVenue?.precision || 'missing'
-    };
-
-    dedupe.set(key, {
-      id: key.replace(/[^a-z0-9]+/gi, '-').toLowerCase(),
-      league: source.league,
-      sourceId: source.id,
-      sourceUrl: source.officialUrl,
-      homeTeam,
-      awayTeam,
-      match: `${homeTeam} vs ${awayTeam}`,
-      status,
-      officialDateText: dateParts.text,
-      ...startInfo,
-      venue,
-      rawSourceSnippet: chunk.slice(0, 800)
-    });
-  }
-
-  return [...dedupe.values()].sort((a, b) => Date.parse(a.startTime) - Date.parse(b.startTime));
-}
-
-async function fetchText(url, referer = null) {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': USL_USER_AGENT,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      ...(referer ? { Referer: referer } : {})
-    }
-  });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText} from ${url}`);
-  return response.text();
-}
-
-function discoverSportsEngineTabUrls(html, baseUrl) {
-  const urls = new Set();
-  const $ = cheerio.load(html);
-  $('[href*="show_layout_tab"]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (href) urls.add(new URL(href, baseUrl).toString());
-  });
-  // Some SportsEngine pages keep AJAX tab URLs inside escaped JS strings.
-  const rx = /(?:href|url)["']?\s*[:=]\s*["']([^"']*show_layout_tab[^"']+)["']/gi;
-  let m;
-  while ((m = rx.exec(html))) urls.add(new URL(m[1].replace(/&amp;/g, '&'), baseUrl).toString());
-  return [...urls];
-}
-
-async function fetchStaticAndTabs(source) {
-  const html = await fetchText(source.officialUrl);
-  let text = cheerio.load(html)('body').text();
-  const tabUrls = discoverSportsEngineTabUrls(html, source.officialUrl);
-  for (const tabUrl of tabUrls) {
-    try {
-      const tabHtml = await fetchText(tabUrl, source.officialUrl);
-      text += '\n' + cheerio.load(tabHtml)('body').text();
-    } catch (err) {
-      text += `\n[WARN could not fetch tab ${tabUrl}: ${err.message}]`;
-    }
-  }
-  return { text, tabUrls };
-}
-
-async function fetchRenderedText(source) {
-  if (!APP.enablePlaywright) return null;
-  let browser;
-  try {
-    const { chromium } = await import('playwright');
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage({ userAgent: USL_USER_AGENT, viewport: { width: 1440, height: 1600 } });
-    await page.goto(source.officialUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-
-    // Expand the full-season tab where the SportsEngine widget exposes it.
-    for (const label of ['Full Season Schedule', 'Regular Season Schedule', '2026 Fall Season Schedule']) {
-      const loc = page.getByText(label, { exact: false });
-      if (await loc.count().catch(() => 0)) {
-        await loc.first().click({ timeout: 3000 }).catch(() => {});
-        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-        break;
-      }
-    }
-
-    // Trigger lazy-loaded schedule rows.
-    for (let i = 0; i < 5; i += 1) {
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-      await page.waitForTimeout(350);
-    }
-    await page.evaluate(() => window.scrollTo(0, 0));
-
-    const text = await page.locator('body').innerText({ timeout: 10000 });
-    return text;
-  } catch (err) {
-    return `[WARN Playwright render failed for ${source.officialUrl}: ${err.message}]`;
-  } finally {
-    if (browser) await browser.close().catch(() => {});
-  }
-}
-
-async function geocodeWithCensus(venue) {
-  if (!venue?.venue || !venue?.city || !venue?.state) return null;
-  const address = `${venue.venue}, ${venue.city}, ${venue.state}`;
-  const url = new URL('https://geocoding.geo.census.gov/geocoder/locations/onelineaddress');
-  url.searchParams.set('address', address);
-  url.searchParams.set('benchmark', 'Public_AR_Current');
-  url.searchParams.set('format', 'json');
-  try {
-    const response = await fetch(url, { headers: { 'User-Agent': USL_USER_AGENT } });
-    if (!response.ok) return null;
-    const json = await response.json();
-    const match = json?.result?.addressMatches?.[0];
-    if (!match?.coordinates) return null;
-    return { lat: match.coordinates.y, lon: match.coordinates.x, precision: 'census-geocoder' };
-  } catch {
-    return null;
-  }
-}
-
-async function hydrateMissingCoordinates(matches) {
-  const out = [];
-  for (const match of matches) {
-    if (typeof match.venue?.lat === 'number' && typeof match.venue?.lon === 'number') {
-      out.push(match);
-      continue;
-    }
-    const geo = await geocodeWithCensus(match.venue);
-    out.push(geo ? { ...match, venue: { ...match.venue, ...geo } } : match);
-  }
-  return out;
-}
-
-export function parseWindow({ window = 'weekend', from, to } = {}) {
-  const now = new Date();
-  if (from && to) return { from: new Date(from), to: new Date(to), label: `${from} to ${to}` };
-
-  if (window === 'tonight') {
-    const start = now;
-    const end = new Date(now.getTime() + 14 * 60 * 60 * 1000);
-    return { from: start, to: end, label: 'Tonight' };
-  }
-
-  if (window === 'today') {
-    const start = new Date(now);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(now);
-    end.setHours(23, 59, 59, 999);
-    return { from: start, to: end, label: 'Today' };
-  }
-
-  // Default: upcoming weekend, Friday 00:00 through Sunday 23:59 in server local time.
-  const start = new Date(now);
-  const day = start.getDay();
-  const daysUntilFriday = (5 - day + 7) % 7;
-  start.setDate(start.getDate() + daysUntilFriday);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(start.getDate() + 2);
-  end.setHours(23, 59, 59, 999);
-  return { from: start, to: end, label: 'Upcoming weekend' };
-}
-
-export async function getOfficialMatches(options = {}) {
-  const { from, to, label } = parseWindow(options);
-  const cacheKey = `schedule:${from.toISOString()}:${to.toISOString()}:${APP.enablePlaywright}`;
-  if (!options.force) {
-    const cached = getCache(cacheKey);
-    if (cached) return cached;
-  }
-
-  const aliasRecords = await loadTeamAliases();
-  const venueCache = await loadVenueCache();
-  const warnings = [];
-  const all = [];
-
-  for (const source of LEAGUE_SOURCES) {
-    try {
-      const rendered = await fetchRenderedText(source);
-      const staticResult = rendered && !rendered.startsWith('[WARN') ? { text: '', tabUrls: [] } : await fetchStaticAndTabs(source);
-      const combinedText = [rendered, staticResult.text].filter(Boolean).join('\n');
-      if (rendered?.startsWith('[WARN')) warnings.push(rendered);
-      const matches = parseFixturesFromText({ text: combinedText, source, aliasRecords, venueCache, from, to });
-      all.push(...matches);
-      if (!matches.length) warnings.push(`No ${source.league} matches parsed from ${source.officialUrl} for ${label}. Check site markup or venue/team aliases.`);
-    } catch (err) {
-      warnings.push(`${source.league}: ${err.message}`);
-    }
-  }
-
-  const hydrated = await hydrateMissingCoordinates(all);
-  const value = {
-    window: { from: from.toISOString(), to: to.toISOString(), label },
-    count: hydrated.length,
-    matches: hydrated.sort((a, b) => Date.parse(a.startTime) - Date.parse(b.startTime)),
-    warnings,
-    sources: LEAGUE_SOURCES.map(s => ({ league: s.league, url: s.officialUrl }))
-  };
-  return setCache(cacheKey, value, APP.cache.scheduleMs);
-}
-
-`````
-
-## `src/weather.js`
-
-`````javascript
-import { APP } from './config.js';
-import { getCache, setCache } from './cache.js';
-
-const NWS_BASE = 'https://api.weather.gov';
-const SPC_BASE = 'https://www.spc.noaa.gov/products/outlook';
-
-const ALERT_CRITICAL = [
-  'Tornado Warning', 'Severe Thunderstorm Warning', 'Flash Flood Warning', 'Extreme Wind Warning'
-];
-const ALERT_HIGH = [
-  'Tornado Watch', 'Severe Thunderstorm Watch', 'Flood Warning', 'Excessive Heat Warning', 'High Wind Warning'
-];
-const ALERT_MODERATE = [
-  'Special Weather Statement', 'Flood Watch', 'Flash Flood Watch', 'Heat Advisory', 'Wind Advisory', 'Dense Fog Advisory', 'Air Quality Alert'
-];
-
-const SPC_DN = {
-  2: 'Thunderstorm',
-  3: 'Marginal',
-  4: 'Slight',
-  5: 'Enhanced',
-  6: 'Moderate',
-  8: 'High'
-};
-const SPC_SCORE = {
-  Thunderstorm: 12,
-  Marginal: 20,
-  Slight: 35,
-  Enhanced: 50,
-  Moderate: 65,
-  High: 80
-};
-const RISK_RANK = { Unknown: 0, Low: 1, Moderate: 2, High: 3, Critical: 4 };
-
-function roundCoord(n) {
-  return Number(n).toFixed(4);
-}
-
-async function getJson(url, { headers = {}, ttlMs = APP.cache.weatherMs, cacheKey = url } = {}) {
-  const cached = getCache(cacheKey);
-  if (cached) return cached;
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': APP.nwsUserAgent,
-      'Accept': 'application/geo+json,application/json;q=0.9,*/*;q=0.8',
-      ...headers
-    }
-  });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
-  const json = await res.json();
-  return setCache(cacheKey, json, ttlMs);
-}
-
-function parseWindMph(windSpeed = '') {
-  const nums = String(windSpeed).match(/\d+/g)?.map(Number) || [];
-  return nums.length ? Math.max(...nums) : null;
-}
-
-function cToF(c) {
-  return c == null ? null : (c * 9 / 5) + 32;
-}
-
-function parseDurationMs(duration = '') {
-  // Handles common NWS validTime durations such as PT1H, PT3H, P1DT6H.
-  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/i.exec(duration);
-  if (!m) return 0;
-  const days = Number(m[1] || 0);
-  const hours = Number(m[2] || 0);
-  const minutes = Number(m[3] || 0);
-  const seconds = Number(m[4] || 0);
-  return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
-}
-
-function intervalFromValidTime(validTime) {
-  if (!validTime || !validTime.includes('/')) return null;
-  const [startRaw, durationRaw] = validTime.split('/');
-  const start = Date.parse(startRaw);
-  const end = start + parseDurationMs(durationRaw);
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  return { start, end };
-}
-
-function sampleGridValues(grid, key, startMs, endMs) {
-  const values = grid?.properties?.[key]?.values || [];
-  return values
-    .map(v => ({ ...v, interval: intervalFromValidTime(v.validTime) }))
-    .filter(v => v.interval && v.interval.start < endMs && v.interval.end > startMs)
-    .map(v => v.value)
-    .filter(v => typeof v === 'number');
-}
-
-function getMatchWindow(match) {
-  const start = Date.parse(match.startTime);
-  if (!Number.isFinite(start)) {
-    const now = Date.now();
-    return { startMs: now, endMs: now + 6 * 60 * 60 * 1000 };
-  }
-  return {
-    startMs: start - 3 * 60 * 60 * 1000,
-    endMs: start + 4 * 60 * 60 * 1000
-  };
-}
-
-function periodsForMatch(hourly, match) {
-  const { startMs, endMs } = getMatchWindow(match);
-  return (hourly?.properties?.periods || []).filter(p => {
-    const start = Date.parse(p.startTime);
-    const end = Date.parse(p.endTime || p.startTime) || start + 60 * 60 * 1000;
-    return Number.isFinite(start) && start < endMs && end > startMs;
-  });
-}
-
-function alertEvent(alert) {
-  return alert?.properties?.event || alert?.event || 'Alert';
-}
-
-function summarizeAlerts(alertsJson) {
-  return (alertsJson?.features || []).map(f => {
-    const p = f.properties || {};
-    return {
-      event: p.event,
-      severity: p.severity,
-      urgency: p.urgency,
-      certainty: p.certainty,
-      effective: p.effective,
-      expires: p.expires,
-      headline: p.headline || p.description?.split('\n')?.[0] || p.event,
-      instruction: p.instruction || ''
-    };
-  });
-}
-
-async function getNwsForPoint(lat, lon) {
-  const key = `nws:${roundCoord(lat)},${roundCoord(lon)}`;
-  const cached = getCache(key);
-  if (cached) return cached;
-
-  const pointUrl = `${NWS_BASE}/points/${roundCoord(lat)},${roundCoord(lon)}`;
-  const point = await getJson(pointUrl, { cacheKey: `${key}:point`, ttlMs: 6 * 60 * 60 * 1000 });
-  const props = point.properties || {};
-
-  const [hourly, daily, grid, alerts] = await Promise.all([
-    props.forecastHourly ? getJson(props.forecastHourly, { cacheKey: `${key}:hourly` }).catch(err => ({ error: err.message })) : null,
-    props.forecast ? getJson(props.forecast, { cacheKey: `${key}:daily` }).catch(err => ({ error: err.message })) : null,
-    props.forecastGridData ? getJson(props.forecastGridData, { cacheKey: `${key}:grid` }).catch(err => ({ error: err.message })) : null,
-    getJson(`${NWS_BASE}/alerts/active?point=${roundCoord(lat)},${roundCoord(lon)}`, { cacheKey: `${key}:alerts` }).catch(err => ({ error: err.message, features: [] }))
-  ]);
-
-  return setCache(key, { point, hourly, daily, grid, alerts }, APP.cache.weatherMs);
-}
-
-async function getSpcDay(day) {
-  const key = `spc:day${day}`;
-  const cached = getCache(key);
-  if (cached) return cached;
-  const url = `${SPC_BASE}/day${day}otlk_cat.nolyr.geojson`;
-  try {
-    const json = await getJson(url, {
-      cacheKey: key,
-      ttlMs: APP.cache.spcMs,
-      headers: { 'Accept': 'application/geo+json,application/json,*/*' }
-    });
-    return setCache(key, { day, url, json }, APP.cache.spcMs);
-  } catch (err) {
-    return setCache(key, { day, url, error: err.message, json: null }, APP.cache.spcMs);
-  }
-}
-
-function utcDayNumber(date) {
-  return Math.floor(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) / 86400000);
-}
-
-function spcDayForMatch(match) {
-  const start = new Date(match.startTime);
-  const now = new Date();
-  const diff = utcDayNumber(start) - utcDayNumber(now);
-  if (diff < 0 || diff > 2) return null;
-  return diff + 1;
-}
-
-function pointInRing(point, ring) {
-  const [x, y] = point;
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i][0], yi = ring[i][1];
-    const xj = ring[j][0], yj = ring[j][1];
-    const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / ((yj - yi) || Number.EPSILON) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function pointInPolygon(point, polygonCoords) {
-  if (!polygonCoords?.length) return false;
-  if (!pointInRing(point, polygonCoords[0])) return false;
-  for (let i = 1; i < polygonCoords.length; i += 1) {
-    if (pointInRing(point, polygonCoords[i])) return false;
-  }
-  return true;
-}
-
-function pointInGeometry(point, geom) {
-  if (!geom) return false;
-  if (geom.type === 'Polygon') return pointInPolygon(point, geom.coordinates);
-  if (geom.type === 'MultiPolygon') return geom.coordinates.some(poly => pointInPolygon(point, poly));
-  return false;
-}
-
-function categoryFromProperties(props = {}) {
-  const label = String(props.LABEL || props.label || props.category || props.CATEGORY || '').trim();
-  if (/high/i.test(label)) return 'High';
-  if (/moderate/i.test(label)) return 'Moderate';
-  if (/enhanced/i.test(label)) return 'Enhanced';
-  if (/slight/i.test(label)) return 'Slight';
-  if (/marginal/i.test(label)) return 'Marginal';
-  if (/thunder/i.test(label) || /^tstm$/i.test(label)) return 'Thunderstorm';
-  const dn = Number(props.DN ?? props.dn ?? props.gridcode);
-  return SPC_DN[dn] || null;
-}
-
-function getSpcCategoryForPoint(spc, lat, lon) {
-  if (!spc?.json?.features) return { day: spc?.day, url: spc?.url, category: null, error: spc?.error || null };
-  const point = [lon, lat];
-  let best = null;
-  let bestScore = -1;
-  for (const feature of spc.json.features) {
-    if (!pointInGeometry(point, feature.geometry)) continue;
-    const category = categoryFromProperties(feature.properties);
-    const score = SPC_SCORE[category] || 0;
-    if (score > bestScore) {
-      best = category;
-      bestScore = score;
-    }
-  }
-  return { day: spc.day, url: spc.url, category: best, score: Math.max(0, bestScore), error: null };
-}
-
-function maxOrNull(values) {
-  const nums = values.filter(v => typeof v === 'number' && Number.isFinite(v));
-  return nums.length ? Math.max(...nums) : null;
-}
-
-function firstNonNull(...values) {
-  return values.find(v => v !== null && v !== undefined);
-}
-
-function computeOperationalRisk({ match, periods, grid, alerts, spc }) {
-  const { startMs, endMs } = getMatchWindow(match);
-  const text = periods.map(p => `${p.shortForecast || ''} ${p.detailedForecast || ''}`).join(' ');
-  const lower = text.toLowerCase();
-  const popMax = maxOrNull(periods.map(p => p.probabilityOfPrecipitation?.value));
-  const tempMax = maxOrNull(periods.map(p => p.temperatureUnit === 'C' ? cToF(p.temperature) : p.temperature));
-  const windMax = maxOrNull(periods.map(p => parseWindMph(p.windSpeed)));
-
-  const apparentF = maxOrNull(sampleGridValues(grid, 'apparentTemperature', startMs, endMs).map(cToF));
-  const heatIndexF = maxOrNull(sampleGridValues(grid, 'heatIndex', startMs, endMs).map(cToF));
-  const humidityMax = maxOrNull(sampleGridValues(grid, 'relativeHumidity', startMs, endMs));
-  const gustMph = maxOrNull(sampleGridValues(grid, 'windGust', startMs, endMs).map(v => v * 2.23694));
-  const windRisk = firstNonNull(gustMph, windMax);
-  const heatRiskF = firstNonNull(heatIndexF, apparentF, tempMax);
-
-  let score = 5;
-  const concerns = [];
-  const actions = [];
-  const alertSummaries = summarizeAlerts(alerts);
-
-  const hasThunder = /thunder|t-storm|tstorm|lightning|severe storm/.test(lower);
-  const heavyRain = /heavy rain|flood|torrential|downpour/.test(lower);
-
-  for (const alert of alertSummaries) {
-    const event = alert.event || '';
-    if (ALERT_CRITICAL.some(a => event.toLowerCase().includes(a.toLowerCase()))) {
-      score = Math.max(score, 92);
-      concerns.push(`${event} active`);
-      actions.push('Prepare immediate referee/weather authority escalation and full sheltering path.');
-    } else if (ALERT_HIGH.some(a => event.toLowerCase().includes(a.toLowerCase()))) {
-      score = Math.max(score, 70);
-      concerns.push(`${event} active`);
-      actions.push('Run high-risk weather huddle, confirm PA/shelter scripts, and pre-stage delay operations.');
-    } else if (ALERT_MODERATE.some(a => event.toLowerCase().includes(a.toLowerCase()))) {
-      score = Math.max(score, 40);
-      concerns.push(`${event} active`);
-    }
-  }
-
-  if (hasThunder) {
-    score += 38;
-    concerns.push('Thunderstorms/lightning in NWS hourly forecast window');
-    actions.push('Start lightning monitoring at gates-open and confirm 30/30 or league lightning protocol.');
-  }
-  if (heavyRain) {
-    score += 18;
-    concerns.push('Heavy rain/flood wording in forecast');
-    actions.push('Inspect field drainage, broadcast positions, ingress/egress, and field-level electrical runs.');
-  }
-  if (typeof popMax === 'number') {
-    if (popMax >= 70) { score += 22; concerns.push(`High precipitation probability: ${popMax}%`); }
-    else if (popMax >= 45) { score += 12; concerns.push(`Elevated precipitation probability: ${popMax}%`); }
-  }
-
-  if (spc?.category) {
-    score += SPC_SCORE[spc.category] || 0;
-    concerns.push(`SPC Day ${spc.day} ${spc.category} severe-weather outlook`);
-    if ((SPC_SCORE[spc.category] || 0) >= 35) actions.push('Monitor SPC outlook updates and nearby watches/mesoscale discussions through kickoff.');
-  }
-
-  if (typeof heatRiskF === 'number') {
-    if (heatRiskF >= 108) {
-      score += 45;
-      concerns.push(`Extreme heat signal near ${Math.round(heatRiskF)}°F apparent/heat-index temperature`);
-      actions.push('Activate heat mitigation: WBGT/heat-index checks, cooling zones, ice towels, extra medical staffing.');
-    } else if (heatRiskF >= 100) {
-      score += 30;
-      concerns.push(`Significant heat signal near ${Math.round(heatRiskF)}°F`);
-      actions.push('Confirm hydration, cooling, AT staffing, and player/staff heat illness response.');
-    } else if (heatRiskF >= 92) {
-      score += 15;
-      concerns.push(`Elevated heat signal near ${Math.round(heatRiskF)}°F`);
-    }
-  }
-
-  if (typeof windRisk === 'number') {
-    if (windRisk >= 45) { score += 35; concerns.push(`Potential high wind/gusts near ${Math.round(windRisk)} mph`); actions.push('Secure temporary structures, signage, camera platforms, and field boards.'); }
-    else if (windRisk >= 30) { score += 15; concerns.push(`Breezy/gusty wind signal near ${Math.round(windRisk)} mph`); }
-  }
-
-  const level = score >= 85 ? 'Critical' : score >= 60 ? 'High' : score >= 30 ? 'Moderate' : 'Low';
-  const uniqueConcerns = [...new Set(concerns)].slice(0, 8);
-  const uniqueActions = [...new Set(actions)].slice(0, 8);
-
-  return {
-    level,
-    score: Math.min(100, Math.round(score)),
-    concerns: uniqueConcerns.length ? uniqueConcerns : ['No high-impact weather signal in current NWS/SPC data window'],
-    recommendedActions: uniqueActions.length ? uniqueActions : ['Standard matchday weather monitoring with final radar/NWS alert check 2-3 hours before kickoff.'],
-    metrics: {
-      popMax,
-      tempMaxF: tempMax == null ? null : Math.round(tempMax),
-      heatIndexOrApparentF: heatRiskF == null ? null : Math.round(heatRiskF),
-      humidityMax,
-      windMaxMph: windRisk == null ? null : Math.round(windRisk),
-      thunderstormSignal: hasThunder,
-      heavyRainSignal: heavyRain
-    },
-    alerts: alertSummaries,
-    spc
-  };
-}
-
-function forecastSummary(periods) {
-  if (!periods?.length) return 'No NWS hourly forecast periods found for match window.';
-  const primary = periods.slice(0, 5).map(p => {
-    const pop = p.probabilityOfPrecipitation?.value;
-    const popText = typeof pop === 'number' ? `, PoP ${pop}%` : '';
-    return `${new Date(p.startTime).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}: ${p.temperature}°${p.temperatureUnit}, ${p.shortForecast}${popText}, wind ${p.windSpeed || 'n/a'}`;
-  });
-  return primary.join(' | ');
-}
-
-async function assessOneMatch(match) {
-  const lat = match.venue?.lat;
-  const lon = match.venue?.lon;
-  if (typeof lat !== 'number' || typeof lon !== 'number') {
-    return {
-      ...match,
-      risk: {
-        level: 'Unknown',
-        score: 0,
-        concerns: ['Venue coordinates missing; update data/venue-cache.json or geocoder result.'],
-        recommendedActions: ['Confirm venue coordinates before relying on weather automation.'],
-        metrics: {},
-        alerts: [],
-        spc: null
-      },
-      weather: null,
-      links: { sourceSchedule: match.sourceUrl }
-    };
-  }
-
-  const nws = await getNwsForPoint(lat, lon);
-  const periods = periodsForMatch(nws.hourly, match);
-  const spcDay = spcDayForMatch(match);
-  const spc = spcDay ? getSpcCategoryForPoint(await getSpcDay(spcDay), lat, lon) : null;
-  const risk = computeOperationalRisk({ match, periods, grid: nws.grid, alerts: nws.alerts, spc });
-
-  return {
-    ...match,
-    risk,
-    weather: {
-      office: nws.point?.properties?.cwa,
-      forecastZone: nws.point?.properties?.forecastZone,
-      gridId: nws.point?.properties?.gridId,
-      gridX: nws.point?.properties?.gridX,
-      gridY: nws.point?.properties?.gridY,
-      hourlySummary: forecastSummary(periods),
-      dailySummary: nws.daily?.properties?.periods?.slice(0, 2)?.map(p => `${p.name}: ${p.shortForecast}`).join(' | ') || null,
-      updateTime: new Date().toISOString()
-    },
-    links: {
-      sourceSchedule: match.sourceUrl,
-      nwsPoint: `${NWS_BASE}/points/${roundCoord(lat)},${roundCoord(lon)}`,
-      nwsForecastPage: `https://forecast.weather.gov/MapClick.php?lat=${roundCoord(lat)}&lon=${roundCoord(lon)}`,
-      nwsAlerts: `${NWS_BASE}/alerts/active?point=${roundCoord(lat)},${roundCoord(lon)}`,
-      radar: 'https://radar.weather.gov/',
-      spcOutlook: spc?.url || 'https://www.spc.noaa.gov/products/outlook/'
-    }
-  };
-}
-
-export async function assessMatches(matches, { force = false } = {}) {
-  const cacheKey = `assessed:${matches.map(m => m.id).join(',')}`;
-  if (!force) {
-    const cached = getCache(cacheKey);
-    if (cached) return cached;
-  }
-
-  const assessed = [];
-  const warnings = [];
-  // Keep concurrency modest for NWS public APIs.
-  const queue = [...matches];
-  const workers = Array.from({ length: 4 }, async () => {
-    while (queue.length) {
-      const match = queue.shift();
-      try {
-        assessed.push(await assessOneMatch(match));
-      } catch (err) {
-        warnings.push(`${match.match}: ${err.message}`);
-        assessed.push({
-          ...match,
-          risk: {
-            level: 'Unknown', score: 0,
-            concerns: [`Weather pull failed: ${err.message}`],
-            recommendedActions: ['Manually check NWS, SPC, and local radar for this venue.'],
-            metrics: {}, alerts: [], spc: null
-          },
-          weather: null,
-          links: { sourceSchedule: match.sourceUrl }
-        });
-      }
-    }
-  });
-  await Promise.all(workers);
-
-  assessed.sort((a, b) => {
-    const rankDiff = (RISK_RANK[b.risk.level] || 0) - (RISK_RANK[a.risk.level] || 0);
-    if (rankDiff) return rankDiff;
-    return Date.parse(a.startTime) - Date.parse(b.startTime);
-  });
-
-  const value = { matches: assessed, warnings };
-  return setCache(cacheKey, value, APP.cache.weatherMs);
-}
-
-export function buildSummary(assessedMatches) {
-  const counts = { Low: 0, Moderate: 0, High: 0, Critical: 0, Unknown: 0 };
-  for (const m of assessedMatches) counts[m.risk?.level || 'Unknown'] += 1;
-  const elevated = assessedMatches.filter(m => ['High', 'Critical'].includes(m.risk.level));
-  const enhanced = assessedMatches.filter(m => m.risk.level === 'Moderate');
-
-  const executive = elevated.length
-    ? `Primary focus: ${elevated.slice(0, 5).map(m => `${m.homeTeam} (${m.venue.city || m.venue.venue || 'venue TBD'})`).join(', ')}. Highest drivers: lightning/thunderstorm signal, active alerts, SPC outlook overlap, heat, heavy rain, or wind where indicated.`
-    : enhanced.length
-      ? `No high/critical matches in the current pull. Enhanced monitoring recommended at ${enhanced.slice(0, 5).map(m => `${m.homeTeam} (${m.venue.city || m.venue.venue || 'venue TBD'})`).join(', ')}.`
-      : 'No elevated match-weather operations identified in the current data pull.';
-
-  return {
-    counts,
-    executive,
-    activeMitigation: elevated.map(m => ({ id: m.id, match: m.match, league: m.league, risk: m.risk.level, actions: m.risk.recommendedActions })),
-    enhancedMonitoring: enhanced.map(m => ({ id: m.id, match: m.match, league: m.league, risk: m.risk.level, actions: m.risk.recommendedActions }))
-  };
-}
-
-`````
-
-## `public/index.html`
-
-`````html
+```html
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>USL Match Weather Operations Dashboard</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
+  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script defer src="app.js"></script>
 </head>
 <body>
-  <header class="hero">
-    <div>
-      <p class="eyebrow">Live USL Weather Risks</p>
-      <h1>Match Weather Operations Dashboard</h1>
-      <p class="subhead">Official USL schedule pulls joined to NOAA/NWS forecasts, active alerts, and SPC severe-weather outlooks.</p>
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <header class="app-header">
+    <div class="brand-block">
+      <p class="eyebrow">USL Weather Ops</p>
+      <h1>Match Weather Risk Dashboard</h1>
+      <p class="subhead">Interactive schedule, forecast, alert, SPC, heat, lightning, and operations view for USL match windows.</p>
     </div>
-    <div class="status-card">
-      <span class="label">Last refresh</span>
-      <strong id="lastRefresh">Not loaded</strong>
-      <span id="windowLabel">—</span>
+
+    <div class="header-actions">
+      <div class="status-card" id="loadStatusCard">
+        <span class="status-dot" id="statusDot"></span>
+        <div>
+          <span class="label">Data status</span>
+          <strong id="dataStatus">Loading</strong>
+          <small id="lastRefresh">Not loaded yet</small>
+        </div>
+      </div>
+      <button class="ghost" id="copySummaryBtn" type="button">Copy summary</button>
+      <button class="primary" id="refreshBtn" type="button">Refresh live data</button>
     </div>
   </header>
 
-  <main>
-    <section class="controls panel">
+  <nav class="view-tabs" aria-label="Dashboard sections">
+    <button class="tab active" data-view="overview" type="button">Overview</button>
+    <button class="tab" data-view="map" type="button">Map</button>
+    <button class="tab" data-view="table" type="button">Risk table</button>
+    <button class="tab" data-view="ops" type="button">Operations</button>
+  </nav>
+
+  <main class="shell">
+    <section id="banner" class="banner hidden"></section>
+
+    <section class="panel controls-panel" aria-label="Dashboard controls">
       <div class="control-group">
-        <label for="windowSelect">Window</label>
+        <label for="windowSelect">Match window</label>
         <select id="windowSelect">
           <option value="tonight">Tonight</option>
           <option value="today">Today</option>
           <option value="weekend" selected>Upcoming weekend</option>
-          <option value="custom">Custom</option>
+          <option value="custom">Custom range</option>
         </select>
       </div>
+
       <div class="control-group custom-date hidden">
         <label for="fromDate">From</label>
         <input id="fromDate" type="datetime-local">
       </div>
+
       <div class="control-group custom-date hidden">
         <label for="toDate">To</label>
         <input id="toDate" type="datetime-local">
       </div>
+
       <div class="control-group">
         <label for="leagueFilter">League</label>
         <select id="leagueFilter">
           <option value="all">All leagues</option>
         </select>
       </div>
+
       <div class="control-group">
         <label for="riskFilter">Risk</label>
         <select id="riskFilter">
@@ -1307,62 +86,176 @@ export function buildSummary(assessedMatches) {
           <option value="Unknown">Unknown</option>
         </select>
       </div>
+
+      <div class="control-group">
+        <label for="driverFilter">Weather driver</label>
+        <select id="driverFilter">
+          <option value="all">All drivers</option>
+          <option value="lightning">Lightning / storms</option>
+          <option value="heat">Heat</option>
+          <option value="alerts">Active alerts</option>
+          <option value="spc">SPC outlook</option>
+          <option value="rain">Heavy rain / flood</option>
+          <option value="wind">Wind</option>
+          <option value="coordinates">Missing coordinates</option>
+        </select>
+      </div>
+
       <div class="control-group grow">
-        <label for="searchBox">Search match, city, venue</label>
-        <input id="searchBox" type="search" placeholder="e.g., Tulsa, Miami, Brooklyn">
+        <label for="searchBox">Search</label>
+        <input id="searchBox" type="search" placeholder="Team, venue, city, risk concern, alert">
       </div>
-      <button id="refreshBtn" class="primary">Refresh live data</button>
-      <label class="toggle"><input id="autoRefresh" type="checkbox" checked> Auto-refresh 5 min</label>
+
+      <div class="control-stack">
+        <label class="checkline"><input id="autoRefresh" type="checkbox" checked> Auto-refresh</label>
+        <label class="checkline"><input id="demoToggle" type="checkbox"> Demo mode</label>
+      </div>
+
+      <button class="ghost" id="clearFiltersBtn" type="button">Clear filters</button>
+      <button class="ghost" id="exportCsvBtn" type="button">Export CSV</button>
     </section>
 
-    <section class="kpis" id="kpis"></section>
-
-    <section class="panel executive">
-      <h2>Executive Summary</h2>
-      <p id="executiveText">Load the dashboard to generate the current operational summary.</p>
-      <div id="sourceWarnings" class="warnings hidden"></div>
+    <section class="meta-strip" aria-label="Current data window">
+      <div>
+        <span class="label">Window</span>
+        <strong id="windowLabel">-</strong>
+      </div>
+      <div>
+        <span class="label">Visible matches</span>
+        <strong id="visibleCount">0</strong>
+      </div>
+      <div>
+        <span class="label">Highest risk</span>
+        <strong id="highestRisk">-</strong>
+      </div>
+      <div>
+        <span class="label">Primary drivers</span>
+        <strong id="driverSummary">-</strong>
+      </div>
     </section>
 
-    <section class="grid-two">
-      <section class="panel">
-        <h2>Elevated-Risk Operations</h2>
-        <div id="elevatedOps" class="action-list empty">No elevated operations loaded yet.</div>
+    <section id="kpiGrid" class="kpi-grid" aria-label="Risk counts"></section>
+
+    <section class="view-panel active" data-panel="overview">
+      <div class="overview-grid">
+        <section class="panel executive-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow small">Executive summary</p>
+              <h2>Weather operations posture</h2>
+            </div>
+            <span class="badge" id="generatedBadge">Not generated</span>
+          </div>
+          <p id="executiveText" class="executive-text">Loading live match/weather data...</p>
+          <div id="sourceWarnings" class="warnings hidden"></div>
+        </section>
+
+        <section class="panel chart-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow small">Risk mix</p>
+              <h2>Distribution</h2>
+            </div>
+          </div>
+          <canvas id="riskChart" height="170"></canvas>
+          <div id="chartFallback" class="chart-fallback hidden"></div>
+        </section>
+      </div>
+
+      <section class="panel timeline-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow small">Operational timeline</p>
+            <h2>Kickoff sequence</h2>
+          </div>
+          <span class="muted">Click a match to focus details</span>
+        </div>
+        <div id="timeline" class="timeline"></div>
       </section>
+
+      <section class="section-heading cards-heading">
+        <div>
+          <p class="eyebrow small">Match cards</p>
+          <h2>Filtered operations board</h2>
+        </div>
+        <span id="cardCount" class="muted">0 matches</span>
+      </section>
+      <section id="cards" class="cards" aria-live="polite"></section>
+    </section>
+
+    <section class="view-panel" data-panel="map">
+      <div class="map-grid">
+        <section class="panel map-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow small">Venue map</p>
+              <h2>Live risk geography</h2>
+            </div>
+            <span class="muted" id="mapStatus">Waiting for data</span>
+          </div>
+          <div id="map" class="map"></div>
+          <div id="mapFallback" class="map-fallback hidden"></div>
+        </section>
+
+        <aside class="panel selected-panel" id="selectedMatchPanel">
+          <p class="eyebrow small">Selected match</p>
+          <h2>No match selected</h2>
+          <p class="muted">Select a card, table row, timeline item, or map marker to see match-level weather operations detail.</p>
+        </aside>
+      </div>
+    </section>
+
+    <section class="view-panel" data-panel="table">
       <section class="panel">
-        <h2>Recommended League Actions</h2>
-        <ol id="leagueActions" class="league-actions"></ol>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow small">Sortable table</p>
+            <h2>Match risk register</h2>
+          </div>
+          <span id="matchCount" class="muted">0 matches</span>
+        </div>
+        <div class="table-wrap">
+          <table id="riskTable">
+            <thead>
+              <tr>
+                <th data-sort="risk" scope="col">Risk</th>
+                <th data-sort="league" scope="col">League</th>
+                <th data-sort="startTime" scope="col">Kickoff</th>
+                <th data-sort="match" scope="col">Match</th>
+                <th data-sort="venue" scope="col">Venue / City</th>
+                <th data-sort="driver" scope="col">Top driver</th>
+                <th scope="col">Forecast / alerts</th>
+                <th scope="col">Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </section>
     </section>
 
-    <section class="panel">
-      <div class="section-heading">
-        <h2>Risk Table</h2>
-        <span id="matchCount" class="muted">0 matches</span>
-      </div>
-      <div class="table-wrap">
-        <table id="riskTable">
-          <thead>
-            <tr>
-              <th data-sort="risk">Risk</th>
-              <th data-sort="league">League</th>
-              <th data-sort="startTime">Kickoff</th>
-              <th data-sort="match">Match</th>
-              <th data-sort="venue">Venue / City</th>
-              <th>Weather concern</th>
-              <th>Links</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </section>
+    <section class="view-panel" data-panel="ops">
+      <div class="ops-grid">
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow small">Elevated operations</p>
+              <h2>Active mitigation / enhanced monitoring</h2>
+            </div>
+          </div>
+          <div id="elevatedOps" class="action-list empty">No elevated operations loaded yet.</div>
+        </section>
 
-    <section class="panel">
-      <div class="section-heading">
-        <h2>Match Detail Cards</h2>
-        <span class="muted">Expandable details include NWS hourly summary, active alerts, SPC overlap, and operations actions.</span>
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow small">League actions</p>
+              <h2>Recommended next steps</h2>
+            </div>
+          </div>
+          <ol id="leagueActions" class="league-actions"></ol>
+        </section>
       </div>
-      <div id="cards" class="cards"></div>
     </section>
   </main>
 
@@ -1376,23 +269,28 @@ export function buildSummary(assessedMatches) {
       <p class="venue-line"></p>
       <p class="kickoff-line"></p>
       <p class="concern-line"></p>
+      <div class="driver-chips"></div>
+      <div class="card-actions">
+        <button class="ghost small-btn" data-card-select type="button">Focus</button>
+        <button class="ghost small-btn" data-card-copy type="button">Copy ops note</button>
+      </div>
       <details>
-        <summary>Operations details</summary>
+        <summary>Forecast, alerts, and actions</summary>
         <div class="details-grid">
           <div>
-            <h4>NWS Forecast Window</h4>
+            <h4>NWS match-window summary</h4>
             <p class="hourly-summary"></p>
           </div>
           <div>
-            <h4>Metrics</h4>
+            <h4>Weather metrics</h4>
             <ul class="metrics"></ul>
           </div>
           <div>
-            <h4>Active Alerts</h4>
+            <h4>Active alerts</h4>
             <ul class="alerts"></ul>
           </div>
           <div>
-            <h4>Recommended Actions</h4>
+            <h4>Recommended actions</h4>
             <ul class="actions"></ul>
           </div>
         </div>
@@ -1400,942 +298,2627 @@ export function buildSummary(assessedMatches) {
       </details>
     </article>
   </template>
-
-  <script src="/app.js" type="module"></script>
 </body>
 </html>
 
-`````
+```
 
 ## `public/styles.css`
 
-`````css
+```css
 :root {
-  --bg: #0f172a;
-  --panel: #111c33;
-  --panel-2: #17233d;
-  --text: #e5edf8;
-  --muted: #9fb0c7;
-  --line: rgba(255,255,255,0.10);
+  color-scheme: dark;
+  --bg: #08111f;
+  --bg-soft: #0c1729;
+  --panel: rgba(15, 25, 44, 0.86);
+  --panel-strong: rgba(21, 34, 58, 0.94);
+  --panel-soft: rgba(255, 255, 255, 0.055);
+  --text: #edf5ff;
+  --muted: #98abc5;
+  --muted-2: #73859d;
+  --line: rgba(255, 255, 255, 0.12);
+  --line-strong: rgba(255, 255, 255, 0.22);
+  --accent: #38bdf8;
+  --accent-2: #a78bfa;
   --low: #22c55e;
   --moderate: #facc15;
   --high: #fb923c;
   --critical: #ef4444;
   --unknown: #94a3b8;
-  --accent: #38bdf8;
-  --shadow: 0 18px 45px rgba(0,0,0,.28);
+  --shadow: 0 22px 60px rgba(0, 0, 0, 0.34);
+  --radius-xl: 24px;
+  --radius-lg: 18px;
+  --radius-md: 13px;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   margin: 0;
-  background: radial-gradient(circle at top left, #1d4ed8 0, rgba(29,78,216,0) 34rem), var(--bg);
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 8% 0%, rgba(56, 189, 248, 0.2), transparent 28rem),
+    radial-gradient(circle at 85% 4%, rgba(167, 139, 250, 0.17), transparent 24rem),
+    linear-gradient(180deg, #08111f 0%, #0b1220 48%, #07101d 100%);
   color: var(--text);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-.hero {
-  display: flex;
-  justify-content: space-between;
-  gap: 1.5rem;
-  padding: 2rem clamp(1rem, 4vw, 3rem) 1.25rem;
-  align-items: flex-end;
+button,
+input,
+select {
+  font: inherit;
 }
 
-.eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .12em; font-size: .76rem; font-weight: 800; margin: 0 0 .35rem; }
-h1 { margin: 0; font-size: clamp(2rem, 4vw, 4rem); line-height: .95; }
-h2 { margin: 0 0 .8rem; font-size: 1.15rem; }
-h3 { margin: .35rem 0 .35rem; }
-h4 { margin: 0 0 .35rem; color: #c9d8ea; }
-.subhead { color: var(--muted); max-width: 62rem; margin: .8rem 0 0; }
-
-.status-card {
-  min-width: 220px;
-  background: rgba(255,255,255,.08);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  padding: 1rem;
-  box-shadow: var(--shadow);
-}
-.status-card strong { display: block; margin: .25rem 0; }
-.label, .muted { color: var(--muted); font-size: .85rem; }
-
-main { padding: 0 clamp(1rem, 4vw, 3rem) 3rem; }
-.panel {
-  background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.032));
-  border: 1px solid var(--line);
-  border-radius: 22px;
-  box-shadow: var(--shadow);
-  padding: 1rem;
-  margin: 1rem 0;
-}
-
-.controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .8rem; }
-.control-group { display: grid; gap: .35rem; min-width: 155px; }
-.control-group.grow { flex: 1; min-width: 240px; }
-label { color: var(--muted); font-size: .82rem; }
-select, input {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: .72rem .8rem;
-  color: var(--text);
-  background: rgba(15, 23, 42, .8);
-  outline: none;
-}
 button {
   border: 0;
-  border-radius: 12px;
-  padding: .78rem 1rem;
-  font-weight: 800;
-  cursor: pointer;
 }
-button.primary { background: var(--accent); color: #06121f; }
-button:disabled { opacity: .55; cursor: progress; }
-.toggle { display: flex; align-items: center; gap: .45rem; margin-bottom: .7rem; }
-.toggle input { width: auto; }
-.hidden { display: none !important; }
 
-.kpis {
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 3px solid rgba(56, 189, 248, 0.55);
+  outline-offset: 3px;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.25rem;
+  align-items: flex-end;
+  padding: 2rem clamp(1rem, 4vw, 3rem) 1rem;
+}
+
+.brand-block {
+  max-width: 840px;
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  margin: 0 0 0.35rem;
+  text-transform: uppercase;
+}
+
+.eyebrow.small {
+  font-size: 0.68rem;
+  margin-bottom: 0.2rem;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 0.6rem;
+  font-size: clamp(2rem, 5vw, 4.65rem);
+  line-height: 0.92;
+  letter-spacing: -0.06em;
+}
+
+h2 {
+  margin-bottom: 0.85rem;
+  font-size: clamp(1.1rem, 1.8vw, 1.5rem);
+  letter-spacing: -0.02em;
+}
+
+h3 {
+  margin-bottom: 0.4rem;
+  font-size: 1.02rem;
+  letter-spacing: -0.01em;
+}
+
+h4 {
+  margin-bottom: 0.35rem;
+  color: #c9d7ec;
+  font-size: 0.9rem;
+}
+
+.subhead {
+  color: var(--muted);
+  max-width: 70rem;
+  margin-bottom: 0;
+  line-height: 1.55;
+}
+
+.header-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.status-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 240px;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.075);
+  box-shadow: var(--shadow);
+}
+
+.status-card strong {
+  display: block;
+  margin: 0.1rem 0;
+}
+
+.status-card small {
+  display: block;
+  color: var(--muted);
+}
+
+.status-dot {
+  display: inline-flex;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  background: var(--unknown);
+  box-shadow: 0 0 0 5px rgba(148, 163, 184, 0.14);
+}
+
+.status-dot.live {
+  background: var(--low);
+  box-shadow: 0 0 0 5px rgba(34, 197, 94, 0.14);
+}
+
+.status-dot.demo {
+  background: var(--moderate);
+  box-shadow: 0 0 0 5px rgba(250, 204, 21, 0.14);
+}
+
+.status-dot.error {
+  background: var(--critical);
+  box-shadow: 0 0 0 5px rgba(239, 68, 68, 0.14);
+}
+
+.label,
+.muted {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.view-tabs {
+  display: flex;
+  gap: 0.55rem;
+  padding: 0 clamp(1rem, 4vw, 3rem) 1rem;
+  overflow-x: auto;
+}
+
+.tab,
+.primary,
+.ghost {
+  border-radius: 999px;
+  padding: 0.72rem 1rem;
+  cursor: pointer;
+  font-weight: 850;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, opacity 0.16s ease;
+  white-space: nowrap;
+}
+
+.tab {
+  color: var(--muted);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.tab.active,
+.tab:hover {
+  color: var(--text);
+  border-color: rgba(56, 189, 248, 0.48);
+  background: rgba(56, 189, 248, 0.13);
+}
+
+.primary {
+  color: #04111e;
+  background: linear-gradient(135deg, #67e8f9, #38bdf8);
+  box-shadow: 0 10px 28px rgba(56, 189, 248, 0.2);
+}
+
+.ghost {
+  color: var(--text);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.primary:hover,
+.ghost:hover,
+.tab:hover {
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  cursor: progress;
+  opacity: 0.55;
+  transform: none;
+}
+
+.small-btn {
+  padding: 0.48rem 0.72rem;
+  font-size: 0.82rem;
+}
+
+.shell {
+  width: min(1780px, 100%);
+  margin: 0 auto;
+  padding: 0 clamp(1rem, 4vw, 3rem) 3rem;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.04));
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.controls-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  padding: 1rem;
+}
+
+.control-group {
   display: grid;
-  grid-template-columns: repeat(5, minmax(130px, 1fr));
-  gap: .8rem;
+  gap: 0.35rem;
+  min-width: 158px;
+}
+
+.control-group.grow {
+  flex: 1 1 270px;
+}
+
+.control-stack {
+  display: grid;
+  gap: 0.45rem;
+  align-self: center;
+  min-width: 135px;
+}
+
+.checkline {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.checkline input {
+  width: auto;
+  accent-color: var(--accent);
+}
+
+label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+select,
+input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 0.72rem 0.82rem;
+  color: var(--text);
+  background: rgba(4, 12, 24, 0.78);
+}
+
+select:hover,
+input:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.hidden {
+  display: none !important;
+}
+
+.banner {
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  border-radius: var(--radius-lg);
+  color: #fef9c3;
+  background: rgba(113, 63, 18, 0.34);
+}
+
+.meta-strip {
+  display: grid;
+  grid-template-columns: 1.35fr 0.75fr 0.75fr 1.5fr;
+  gap: 0.75rem;
   margin: 1rem 0;
 }
+
+.meta-strip > div,
+.kpi,
+.match-card,
+.action-item,
+.timeline-item,
+.selected-detail-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.meta-strip > div {
+  padding: 0.82rem 0.92rem;
+}
+
+.meta-strip strong {
+  display: block;
+  margin-top: 0.22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(125px, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
 .kpi {
-  background: rgba(255,255,255,.07);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  padding: .9rem;
+  position: relative;
+  overflow: hidden;
+  padding: 0.9rem;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
 }
-.kpi strong { display: block; font-size: 2rem; }
-.kpi span { color: var(--muted); font-size: .85rem; }
 
-.grid-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; }
-.action-list { display: grid; gap: .65rem; }
-.action-item {
-  background: rgba(255,255,255,.05);
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: .8rem;
+.kpi::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 6px;
+  background: var(--unknown);
 }
-.action-item strong { display: block; margin-bottom: .3rem; }
-.league-actions { margin: 0; padding-left: 1.25rem; color: #dbe8f7; }
-.league-actions li { margin: .48rem 0; }
-.empty { color: var(--muted); }
 
-.section-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: .8rem; }
-.table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; min-width: 980px; }
-th, td { border-bottom: 1px solid var(--line); padding: .8rem .65rem; text-align: left; vertical-align: top; }
-th { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; cursor: pointer; }
-td { color: #e9f1fb; }
-tr:hover td { background: rgba(255,255,255,.035); }
+.kpi[data-risk="Low"]::before { background: var(--low); }
+.kpi[data-risk="Moderate"]::before { background: var(--moderate); }
+.kpi[data-risk="High"]::before { background: var(--high); }
+.kpi[data-risk="Critical"]::before { background: var(--critical); }
+.kpi[data-risk="Unknown"]::before { background: var(--unknown); }
+
+.kpi strong {
+  display: block;
+  margin-bottom: 0.15rem;
+  font-size: clamp(1.7rem, 3vw, 2.45rem);
+  letter-spacing: -0.05em;
+}
+
+.kpi span {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.kpi.active {
+  border-color: rgba(56, 189, 248, 0.7);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.view-panel {
+  display: none;
+}
+
+.view-panel.active {
+  display: block;
+}
+
+.overview-grid,
+.map-grid,
+.ops-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.overview-grid {
+  grid-template-columns: minmax(0, 1.55fr) minmax(330px, 0.8fr);
+}
+
+.map-grid {
+  grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.65fr);
+}
+
+.ops-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.executive-card,
+.chart-card,
+.timeline-card,
+.map-panel,
+.selected-panel,
+.ops-grid .panel,
+.view-panel[data-panel="table"] .panel {
+  padding: 1rem;
+}
+
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.section-heading h2,
+.section-heading p {
+  margin-bottom: 0;
+}
+
+.badge,
+.driver-chip,
+.link-chip,
+.alert-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  border-radius: 999px;
+  padding: 0.26rem 0.58rem;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.76rem;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.badge {
+  color: #d7ecff;
+}
+
+.executive-text {
+  margin-bottom: 0;
+  color: #dceafe;
+  line-height: 1.65;
+  font-size: 1.04rem;
+}
+
+.warnings {
+  margin-top: 1rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(250, 204, 21, 0.25);
+  border-radius: var(--radius-lg);
+  color: #fef3c7;
+  background: rgba(113, 63, 18, 0.24);
+}
+
+.warnings ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.warnings li {
+  margin: 0.32rem 0;
+}
+
+.chart-card {
+  min-height: 260px;
+}
+
+.chart-fallback {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: 86px 1fr 36px;
+  gap: 0.5rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.bar-track {
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.bar-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--unknown);
+}
+
+.bar-fill.Low { background: var(--low); }
+.bar-fill.Moderate { background: var(--moderate); }
+.bar-fill.High { background: var(--high); }
+.bar-fill.Critical { background: var(--critical); }
+.bar-fill.Unknown { background: var(--unknown); }
+
+.timeline {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.timeline-day {
+  margin-top: 0.55rem;
+  color: var(--muted);
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.75rem;
+}
+
+.timeline-item {
+  display: grid;
+  grid-template-columns: 145px 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  width: 100%;
+  padding: 0.75rem;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.timeline-item:hover,
+.timeline-item.selected,
+.match-card.selected,
+tr.selected td {
+  border-color: rgba(56, 189, 248, 0.6);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.timeline-time {
+  color: #dbeafe;
+  font-weight: 900;
+}
+
+.timeline-match strong {
+  display: block;
+}
+
+.timeline-match span {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.cards-heading {
+  margin: 1.15rem 0 0.75rem;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 1rem;
+}
+
+.match-card {
+  padding: 1rem;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.match-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-strong);
+}
+
+.card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
 
 .risk-pill {
   display: inline-flex;
   align-items: center;
-  gap: .35rem;
+  gap: 0.32rem;
   border-radius: 999px;
-  padding: .28rem .62rem;
-  font-weight: 900;
-  font-size: .78rem;
-  color: #07111f;
+  padding: 0.28rem 0.62rem;
+  color: #06111f;
+  background: var(--unknown);
+  font-size: 0.78rem;
+  font-weight: 950;
+  white-space: nowrap;
 }
-.risk-Low { background: var(--low); }
-.risk-Moderate { background: var(--moderate); }
-.risk-High { background: var(--high); }
+
+.risk-Low { background: var(--low); color: #04140b; }
+.risk-Moderate { background: var(--moderate); color: #171000; }
+.risk-High { background: var(--high); color: #180b03; }
 .risk-Critical { background: var(--critical); color: white; }
-.risk-Unknown { background: var(--unknown); }
+.risk-Unknown { background: var(--unknown); color: #07111f; }
 
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
-.match-card {
-  background: rgba(255,255,255,.055);
+.league {
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: right;
+}
+
+.venue-line,
+.kickoff-line,
+.concern-line {
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+  line-height: 1.45;
+}
+
+.concern-line {
+  color: #d8e8f9;
+}
+
+.driver-chips,
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.8rem 0 0.35rem;
+}
+
+summary {
+  margin-top: 0.8rem;
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+}
+
+.details-grid p,
+.details-grid li {
+  color: var(--muted);
+  line-height: 1.45;
+  font-size: 0.9rem;
+}
+
+.details-grid ul {
+  margin: 0;
+  padding-left: 1.12rem;
+}
+
+.link-chip:hover {
+  color: var(--text);
+  border-color: rgba(56, 189, 248, 0.45);
+}
+
+.map {
+  height: min(68vh, 760px);
+  min-height: 520px;
+  overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 20px;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.map-fallback {
   padding: 1rem;
+  color: var(--muted);
 }
-.card-top { display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
-.league { color: var(--muted); font-size: .82rem; }
-.venue-line, .kickoff-line, .concern-line { color: var(--muted); margin: .25rem 0; }
-.concern-line { color: #d8e6f7; }
-summary { margin-top: .75rem; cursor: pointer; color: var(--accent); font-weight: 800; }
-.details-grid { display: grid; gap: .8rem; margin-top: .8rem; }
-ul { margin: .25rem 0 0; padding-left: 1.05rem; }
-li { margin: .2rem 0; }
-.links { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .9rem; }
-a.link-chip {
-  display: inline-flex;
-  color: #07111f;
-  background: #c9e8ff;
-  text-decoration: none;
+
+.venue-marker {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 2px solid white;
   border-radius: 999px;
-  padding: .35rem .6rem;
-  font-weight: 800;
-  font-size: .78rem;
-}
-.warnings {
-  margin-top: .8rem;
-  border-left: 4px solid var(--moderate);
-  background: rgba(250, 204, 21, .08);
-  padding: .7rem .8rem;
-  color: #fff7cc;
-  border-radius: 12px;
+  color: #06111f;
+  font-size: 0.82rem;
+  font-weight: 950;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.34);
 }
 
-@media (max-width: 850px) {
-  .hero { display: block; }
-  .status-card { margin-top: 1rem; }
-  .grid-two { grid-template-columns: 1fr; }
-  .kpis { grid-template-columns: repeat(2, 1fr); }
+.venue-marker.Low { background: var(--low); }
+.venue-marker.Moderate { background: var(--moderate); }
+.venue-marker.High { background: var(--high); }
+.venue-marker.Critical { background: var(--critical); color: white; }
+.venue-marker.Unknown { background: var(--unknown); }
+
+.selected-panel {
+  align-self: start;
+  position: sticky;
+  top: 1rem;
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
 }
 
-`````
+.selected-detail-card {
+  padding: 0.9rem;
+}
+
+.selected-detail-card p,
+.selected-detail-card li {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.selected-detail-card ul,
+.selected-detail-card ol {
+  padding-left: 1.2rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+
+table {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.78rem 0.68rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--muted);
+  background: rgba(8, 17, 31, 0.96);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+}
+
+tbody tr {
+  cursor: pointer;
+}
+
+tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+td {
+  color: #e8f2ff;
+  font-size: 0.92rem;
+}
+
+.action-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.action-item {
+  padding: 0.82rem;
+}
+
+.action-item strong {
+  display: block;
+  margin-bottom: 0.4rem;
+}
+
+.action-item ul,
+.league-actions {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.action-item li,
+.league-actions li {
+  margin: 0.42rem 0;
+  color: #dbe8f7;
+  line-height: 1.42;
+}
+
+.empty,
+.empty-state {
+  color: var(--muted);
+}
+
+.empty-state {
+  padding: 1rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+
+.toast-region {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 9999;
+  display: grid;
+  gap: 0.6rem;
+  width: min(420px, calc(100vw - 2rem));
+}
+
+.toast {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 0.75rem 0.9rem;
+  color: var(--text);
+  background: rgba(15, 25, 44, 0.96);
+  box-shadow: var(--shadow);
+}
+
+.toast.warning {
+  border-color: rgba(250, 204, 21, 0.35);
+  color: #fef9c3;
+}
+
+.toast.error {
+  border-color: rgba(239, 68, 68, 0.38);
+  color: #fecaca;
+}
+
+.leaflet-container {
+  background: #0b1220;
+  font: inherit;
+}
+
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  color: #0f172a;
+}
+
+@media (max-width: 1100px) {
+  .app-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .header-actions {
+    justify-content: flex-start;
+  }
+
+  .meta-strip,
+  .overview-grid,
+  .map-grid,
+  .ops-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .selected-panel {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .controls-panel {
+    align-items: stretch;
+  }
+
+  .control-group,
+  .control-stack,
+  .primary,
+  .ghost {
+    width: 100%;
+  }
+
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .timeline-item {
+    grid-template-columns: 1fr;
+  }
+
+  .details-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cards {
+    grid-template-columns: 1fr;
+  }
+
+  .map {
+    min-height: 420px;
+  }
+}
+
+@media print {
+  body {
+    background: white;
+    color: black;
+  }
+
+  .controls-panel,
+  .view-tabs,
+  .header-actions,
+  .card-actions,
+  .toast-region {
+    display: none !important;
+  }
+
+  .panel,
+  .match-card,
+  .meta-strip > div {
+    box-shadow: none;
+    background: white;
+    border-color: #d1d5db;
+  }
+}
+
+```
 
 ## `public/app.js`
 
-`````javascript
-const state = {
-  data: null,
-  sortKey: 'risk',
-  sortDir: 'desc',
-  autoTimer: null
-};
+```javascript
+(() => {
+  'use strict';
 
-const riskRank = { Critical: 4, High: 3, Moderate: 2, Low: 1, Unknown: 0 };
-const riskEmoji = { Critical: '🔴', High: '🟠', Moderate: '🟡', Low: '🟢', Unknown: '⚪' };
+  const AUTO_REFRESH_MS = 5 * 60 * 1000;
+  const RISK_ORDER = ['Critical', 'High', 'Moderate', 'Low', 'Unknown'];
+  const RISK_RANK = { Critical: 5, High: 4, Moderate: 3, Low: 2, Unknown: 1 };
+  const RISK_EMOJI = { Critical: '🔴', High: '🟠', Moderate: '🟡', Low: '🟢', Unknown: '⚪' };
+  const DRIVER_LABELS = {
+    lightning: 'Lightning / storms',
+    heat: 'Heat',
+    alerts: 'Active alerts',
+    spc: 'SPC outlook',
+    rain: 'Heavy rain / flood',
+    wind: 'Wind',
+    coordinates: 'Missing coordinates'
+  };
 
-const el = id => document.getElementById(id);
+  const state = {
+    data: null,
+    matches: [],
+    filtered: [],
+    selectedMatchId: null,
+    activeView: 'overview',
+    sortKey: 'risk',
+    sortDir: 'desc',
+    loading: false,
+    demoMode: false,
+    loadError: null,
+    autoTimer: null,
+    chart: null,
+    map: null,
+    markerLayer: null,
+    filtersReady: false
+  };
 
-function fmtDate(iso) {
-  if (!iso) return 'Time TBD';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return 'Time TBD';
-  return d.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
-}
+  const $ = selector => document.querySelector(selector);
+  const $$ = selector => Array.from(document.querySelectorAll(selector));
+  const byId = id => document.getElementById(id);
 
-function htmlEscape(value = '') {
-  return String(value).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
-}
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
 
-function riskPill(level) {
-  const safe = level || 'Unknown';
-  return `<span class="risk-pill risk-${safe}">${riskEmoji[safe] || '⚪'} ${safe}</span>`;
-}
+  function escapeHtml(value = '') {
+    return String(value).replace(/[&<>"']/g, ch => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[ch]));
+  }
 
-function getFilters() {
-  const league = el('leagueFilter').value;
-  const risk = el('riskFilter').value;
-  const q = el('searchBox').value.trim().toLowerCase();
-  return { league, risk, q };
-}
-
-function applyFilters(matches) {
-  const { league, risk, q } = getFilters();
-  return matches.filter(m => {
-    if (league !== 'all' && m.league !== league) return false;
-    if (risk !== 'all' && m.risk.level !== risk) return false;
-    if (q) {
-      const hay = [m.match, m.league, m.venue?.venue, m.venue?.city, m.venue?.state, ...(m.risk.concerns || [])].join(' ').toLowerCase();
-      if (!hay.includes(q)) return false;
+  function safeUrl(value) {
+    if (!value) return null;
+    try {
+      const url = new URL(value, window.location.origin);
+      if (['http:', 'https:'].includes(url.protocol)) return url.toString();
+      return null;
+    } catch {
+      return null;
     }
+  }
+
+  function toast(message, type = 'info') {
+    const node = document.createElement('div');
+    node.className = `toast ${type}`;
+    node.textContent = message;
+    byId('toastRegion').appendChild(node);
+    window.setTimeout(() => node.remove(), 5200);
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return 'Time TBD';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return 'Time TBD';
+    return d.toLocaleString([], {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short'
+    });
+  }
+
+  function fmtShortTime(iso) {
+    if (!iso) return 'TBD';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return 'TBD';
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function fmtDay(iso) {
+    if (!iso) return 'Unscheduled';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return 'Unscheduled';
+    return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  }
+
+  function fmtWindow(windowInfo) {
+    if (!windowInfo) return '-';
+    const label = windowInfo.label || 'Custom window';
+    return `${label}: ${fmtDate(windowInfo.from)} to ${fmtDate(windowInfo.to)}`;
+  }
+
+  function riskLevel(value) {
+    return RISK_RANK[value] ? value : 'Unknown';
+  }
+
+  function riskPill(level, score = null) {
+    const safe = riskLevel(level);
+    const scoreText = Number.isFinite(score) ? ` · ${score}` : '';
+    return `<span class="risk-pill risk-${safe}">${RISK_EMOJI[safe]} ${safe}${scoreText}</span>`;
+  }
+
+  function venueText(match) {
+    const v = match.venue || {};
+    return [v.venue, v.city, v.state].filter(Boolean).join(' / ') || 'Venue TBD';
+  }
+
+  function cityText(match) {
+    const v = match.venue || {};
+    return [v.city, v.state].filter(Boolean).join(', ') || v.venue || 'Venue TBD';
+  }
+
+  function concernText(match, limit = 2) {
+    const concerns = match.risk?.concerns || [];
+    return concerns.slice(0, limit).join('; ') || 'No weather concern provided.';
+  }
+
+  function metricNumber(match, key) {
+    const value = match.risk?.metrics?.[key];
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function matchHaystack(match) {
+    const alerts = (match.risk?.alerts || []).map(a => `${a.event || ''} ${a.headline || ''}`).join(' ');
+    return [
+      match.match,
+      match.league,
+      match.homeTeam,
+      match.awayTeam,
+      match.status,
+      match.venue?.venue,
+      match.venue?.city,
+      match.venue?.state,
+      match.weather?.hourlySummary,
+      ...(match.risk?.concerns || []),
+      ...(match.risk?.recommendedActions || []),
+      alerts
+    ].filter(Boolean).join(' ').toLowerCase();
+  }
+
+  function driversForMatch(match) {
+    const drivers = [];
+    const hay = matchHaystack(match);
+    const metrics = match.risk?.metrics || {};
+    const alerts = match.risk?.alerts || [];
+    const spc = match.risk?.spc;
+
+    if (metrics.thunderstormSignal || /thunder|lightning|t-storm|tstorm|severe storm/.test(hay)) drivers.push('lightning');
+    if ((metrics.heatIndexOrApparentF || metrics.tempMaxF || 0) >= 92 || /heat|wbgt|apparent temperature|excessive heat/.test(hay)) drivers.push('heat');
+    if (alerts.length || /warning|watch|advisory|special weather statement/.test(hay)) drivers.push('alerts');
+    if (spc?.category || /spc|marginal|slight|enhanced|moderate severe|high severe/.test(hay)) drivers.push('spc');
+    if (metrics.heavyRainSignal || /heavy rain|flood|downpour|drainage|torrential/.test(hay)) drivers.push('rain');
+    if ((metrics.windMaxMph || 0) >= 30 || /wind|gust|breezy/.test(hay)) drivers.push('wind');
+    if (!(Number.isFinite(match.venue?.lat) && Number.isFinite(match.venue?.lon))) drivers.push('coordinates');
+
+    return [...new Set(drivers)];
+  }
+
+  function linkChips(links = {}, compact = false) {
+    const labels = [
+      ['sourceSchedule', 'USL schedule'],
+      ['nwsForecastPage', 'NWS forecast'],
+      ['nwsAlerts', 'NWS alerts'],
+      ['radar', 'Radar'],
+      ['spcOutlook', 'SPC outlook'],
+      ['nwsPoint', 'NWS point']
+    ];
+
+    const html = labels
+      .map(([key, label]) => [safeUrl(links[key]), label])
+      .filter(([url]) => Boolean(url))
+      .slice(0, compact ? 3 : 6)
+      .map(([url, label]) => `<a class="link-chip" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`)
+      .join('');
+
+    return html || '<span class="muted">No links</span>';
+  }
+
+  function alertItems(alerts = []) {
+    if (!alerts.length) return ['No active NWS alerts for the venue point.'];
+    return alerts.slice(0, 5).map(alert => {
+      const parts = [alert.event || 'Alert'];
+      if (alert.severity) parts.push(`(${alert.severity})`);
+      if (alert.headline) parts.push(`- ${alert.headline}`);
+      return parts.join(' ');
+    });
+  }
+
+  function metricItems(match) {
+    const metrics = match.risk?.metrics || {};
+    const spc = match.risk?.spc;
+    const items = [];
+    if (metrics.popMax != null) items.push(`PoP max: ${metrics.popMax}%`);
+    if (metrics.tempMaxF != null) items.push(`Temp max: ${metrics.tempMaxF}°F`);
+    if (metrics.heatIndexOrApparentF != null) items.push(`Heat/app. temp: ${metrics.heatIndexOrApparentF}°F`);
+    if (metrics.humidityMax != null) items.push(`Humidity max: ${Math.round(metrics.humidityMax)}%`);
+    if (metrics.windMaxMph != null) items.push(`Wind/gust: ${metrics.windMaxMph} mph`);
+    if (spc?.category) items.push(`SPC Day ${spc.day}: ${spc.category}`);
+    items.push(`Thunderstorm signal: ${metrics.thunderstormSignal ? 'Yes' : 'No'}`);
+    if (metrics.heavyRainSignal) items.push('Heavy-rain signal: Yes');
+    return items;
+  }
+
+  function ensureSummary(matches, summary = {}) {
+    const counts = { Critical: 0, High: 0, Moderate: 0, Low: 0, Unknown: 0 };
+    matches.forEach(match => { counts[riskLevel(match.risk?.level)] += 1; });
+    const high = matches.filter(m => ['Critical', 'High'].includes(riskLevel(m.risk?.level)));
+    const moderate = matches.filter(m => riskLevel(m.risk?.level) === 'Moderate');
+
+    const executive = summary.executive || (
+      high.length
+        ? `Primary focus: ${high.slice(0, 5).map(m => `${m.homeTeam || m.match} (${cityText(m)})`).join(', ')}. Highest drivers are shown in the match cards, table, and map.`
+        : moderate.length
+          ? `No high/critical matches in this pull. Enhanced monitoring recommended at ${moderate.slice(0, 5).map(m => `${m.homeTeam || m.match} (${cityText(m)})`).join(', ')}.`
+          : 'No elevated match-weather operations identified in the current data pull.'
+    );
+
+    return {
+      ...summary,
+      counts,
+      executive,
+      activeMitigation: summary.activeMitigation || high.map(m => ({ id: m.id, match: m.match, league: m.league, risk: m.risk.level, actions: m.risk.recommendedActions || [] })),
+      enhancedMonitoring: summary.enhancedMonitoring || moderate.map(m => ({ id: m.id, match: m.match, league: m.league, risk: m.risk.level, actions: m.risk.recommendedActions || [] }))
+    };
+  }
+
+  function upcomingFridayBase() {
+    const now = new Date();
+    const base = new Date(now);
+    const day = base.getDay();
+    const daysUntilFriday = (5 - day + 7) % 7;
+    base.setDate(base.getDate() + daysUntilFriday);
+    base.setHours(0, 0, 0, 0);
+    return base;
+  }
+
+  function retimeDemoData(data) {
+    const copy = structuredClone(data);
+    const friday = upcomingFridayBase();
+    const offsets = [
+      [0, 19, 0],
+      [1, 17, 0],
+      [1, 19, 30],
+      [1, 22, 0],
+      [2, 18, 0],
+      [2, 20, 30]
+    ];
+
+    copy.matches = (copy.matches || []).map((match, index) => {
+      const [dayOffset, hour, minute] = offsets[index % offsets.length];
+      const d = new Date(friday);
+      d.setDate(friday.getDate() + dayOffset);
+      d.setHours(hour, minute, 0, 0);
+      return { ...match, startTime: d.toISOString(), timeEstimated: false };
+    });
+
+    const end = new Date(friday);
+    end.setDate(friday.getDate() + 2);
+    end.setHours(23, 59, 59, 999);
+    copy.generatedAt = new Date().toISOString();
+    copy.window = { from: friday.toISOString(), to: end.toISOString(), label: 'Demo upcoming weekend' };
+    copy.meta = { ...(copy.meta || {}), demo: true };
+    return copy;
+  }
+
+  function normalizeData(rawData, { demo = false, loadError = null } = {}) {
+    const data = demo ? retimeDemoData(rawData) : structuredClone(rawData);
+    const matches = (data.matches || []).map((raw, index) => {
+      const level = riskLevel(raw.risk?.level);
+      const id = raw.id || `${raw.league || 'league'}-${raw.match || index}-${raw.startTime || index}`.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+      const match = {
+        ...raw,
+        id,
+        league: raw.league || 'Unknown league',
+        match: raw.match || [raw.homeTeam, raw.awayTeam].filter(Boolean).join(' vs ') || 'Match TBD',
+        homeTeam: raw.homeTeam || 'Home team',
+        awayTeam: raw.awayTeam || 'Away team',
+        venue: raw.venue || {},
+        links: raw.links || {},
+        weather: raw.weather || {},
+        risk: {
+          level,
+          score: Number.isFinite(raw.risk?.score) ? raw.risk.score : 0,
+          concerns: Array.isArray(raw.risk?.concerns) ? raw.risk.concerns : [],
+          recommendedActions: Array.isArray(raw.risk?.recommendedActions) ? raw.risk.recommendedActions : [],
+          metrics: raw.risk?.metrics || {},
+          alerts: Array.isArray(raw.risk?.alerts) ? raw.risk.alerts : [],
+          spc: raw.risk?.spc || null
+        }
+      };
+      match.drivers = driversForMatch(match);
+      return match;
+    });
+
+    matches.sort((a, b) => (Date.parse(a.startTime) || 0) - (Date.parse(b.startTime) || 0));
+    data.matches = matches;
+    data.summary = ensureSummary(matches, data.summary || {});
+    data.generatedAt = data.generatedAt || new Date().toISOString();
+    data.sourceWarnings = Array.isArray(data.sourceWarnings) ? data.sourceWarnings : [];
+    data.__demo = Boolean(demo || data.meta?.demo);
+    data.__loadError = loadError;
+    return data;
+  }
+
+  function getFilterState() {
+    return {
+      league: byId('leagueFilter').value,
+      risk: byId('riskFilter').value,
+      driver: byId('driverFilter').value,
+      query: byId('searchBox').value.trim().toLowerCase()
+    };
+  }
+
+  function applyFilters(matches) {
+    const filters = getFilterState();
+    return matches.filter(match => {
+      if (filters.league !== 'all' && match.league !== filters.league) return false;
+      if (filters.risk !== 'all' && riskLevel(match.risk?.level) !== filters.risk) return false;
+      if (filters.driver !== 'all' && !match.drivers.includes(filters.driver)) return false;
+      if (filters.query && !matchHaystack(match).includes(filters.query)) return false;
+      return true;
+    });
+  }
+
+  function sortMatches(matches) {
+    const dir = state.sortDir === 'asc' ? 1 : -1;
+    const getValue = match => {
+      if (state.sortKey === 'risk') return RISK_RANK[riskLevel(match.risk?.level)] || 0;
+      if (state.sortKey === 'venue') return venueText(match);
+      if (state.sortKey === 'driver') return (match.drivers || []).map(d => DRIVER_LABELS[d]).join(', ');
+      if (state.sortKey === 'startTime') return Date.parse(match.startTime) || 0;
+      return match[state.sortKey] || '';
+    };
+
+    return [...matches].sort((a, b) => {
+      const av = getValue(a);
+      const bv = getValue(b);
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+      return String(av).localeCompare(String(bv)) * dir;
+    });
+  }
+
+  function buildQuery(force = false) {
+    const params = new URLSearchParams();
+    const windowValue = byId('windowSelect').value;
+    if (windowValue === 'custom') {
+      const from = byId('fromDate').value;
+      const to = byId('toDate').value;
+      if (from && to) {
+        params.set('from', new Date(from).toISOString());
+        params.set('to', new Date(to).toISOString());
+      } else {
+        params.set('window', 'weekend');
+      }
+    } else {
+      params.set('window', windowValue);
+    }
+    if (force) params.set('refresh', 'true');
+    return params;
+  }
+
+  async function fetchJson(url) {
+    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    const contentType = response.headers.get('content-type') || '';
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    if (!contentType.includes('application/json')) {
+      const text = await response.text();
+      const sample = text.slice(0, 80).replace(/\s+/g, ' ');
+      throw new Error(`Expected JSON but received ${contentType || 'text/html'} (${sample}...)`);
+    }
+    return response.json();
+  }
+
+  async function loadDemoData(loadError = null) {
+    const data = await fetchJson('demo-dashboard.json');
+    state.data = normalizeData(data, { demo: true, loadError });
+    state.matches = state.data.matches;
+    state.demoMode = true;
+    state.loadError = loadError;
+  }
+
+  async function loadDashboard(force = false) {
+    if (state.loading) return;
+    state.loading = true;
+    byId('refreshBtn').disabled = true;
+    byId('refreshBtn').textContent = 'Refreshing...';
+    setStatus('loading');
+
+    const wantsDemo = byId('demoToggle').checked;
+    try {
+      if (wantsDemo) {
+        await loadDemoData(null);
+      } else {
+        const data = await fetchJson(`api/dashboard?${buildQuery(force).toString()}`);
+        state.data = normalizeData(data, { demo: false });
+        state.matches = state.data.matches;
+        state.demoMode = false;
+        state.loadError = null;
+      }
+      state.selectedMatchId = state.selectedMatchId || state.matches[0]?.id || null;
+      renderAll();
+      toast(state.demoMode ? 'Demo dashboard loaded.' : 'Live dashboard refreshed.');
+    } catch (err) {
+      console.error(err);
+      try {
+        await loadDemoData(err.message);
+        state.selectedMatchId = state.matches[0]?.id || null;
+        renderAll();
+        toast('Live API unavailable. Showing interactive demo data.', 'warning');
+      } catch (demoErr) {
+        console.error(demoErr);
+        state.loadError = err.message;
+        setStatus('error');
+        showBanner(`Dashboard load failed: ${err.message}. Demo fallback also failed: ${demoErr.message}`);
+        toast('Dashboard load failed.', 'error');
+      }
+    } finally {
+      state.loading = false;
+      byId('refreshBtn').disabled = false;
+      byId('refreshBtn').textContent = 'Refresh live data';
+      resetAutoRefresh();
+    }
+  }
+
+  function setStatus(mode) {
+    const dot = byId('statusDot');
+    const label = byId('dataStatus');
+    dot.className = 'status-dot';
+
+    if (mode === 'loading') {
+      label.textContent = 'Loading';
+      byId('lastRefresh').textContent = 'Fetching schedule and weather data';
+      return;
+    }
+
+    if (mode === 'error') {
+      dot.classList.add('error');
+      label.textContent = 'Error';
+      byId('lastRefresh').textContent = state.loadError || 'Load failed';
+      return;
+    }
+
+    if (state.demoMode) {
+      dot.classList.add('demo');
+      label.textContent = 'Demo data';
+    } else {
+      dot.classList.add('live');
+      label.textContent = 'Live data';
+    }
+    byId('lastRefresh').textContent = `Updated ${fmtDate(state.data?.generatedAt)}`;
+  }
+
+  function showBanner(message = '') {
+    const banner = byId('banner');
+    if (!message) {
+      banner.classList.add('hidden');
+      banner.textContent = '';
+      return;
+    }
+    banner.classList.remove('hidden');
+    banner.textContent = message;
+  }
+
+  function populateFilters(matches) {
+    const leagueSelect = byId('leagueFilter');
+    const currentLeague = leagueSelect.value;
+    const leagues = [...new Set(matches.map(m => m.league).filter(Boolean))].sort();
+    leagueSelect.innerHTML = '<option value="all">All leagues</option>' + leagues
+      .map(league => `<option value="${escapeHtml(league)}">${escapeHtml(league)}</option>`)
+      .join('');
+    leagueSelect.value = leagues.includes(currentLeague) ? currentLeague : 'all';
+  }
+
+  function renderMeta() {
+    const matches = state.filtered;
+    const highestMatch = matches.length
+      ? [...matches].sort((a, b) => (RISK_RANK[riskLevel(b.risk?.level)] || 0) - (RISK_RANK[riskLevel(a.risk?.level)] || 0))[0]
+      : null;
+    const highest = highestMatch ? riskLevel(highestMatch.risk?.level) : '-';
+    const driverCounts = {};
+    matches.forEach(match => {
+      match.drivers.forEach(driver => { driverCounts[driver] = (driverCounts[driver] || 0) + 1; });
+    });
+    const drivers = Object.entries(driverCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([driver, count]) => `${DRIVER_LABELS[driver]} (${count})`)
+      .join(', ');
+
+    byId('windowLabel').textContent = fmtWindow(state.data?.window);
+    byId('visibleCount').textContent = `${matches.length} of ${state.matches.length}`;
+    byId('highestRisk').textContent = highest === '-' ? '-' : `${RISK_EMOJI[highest]} ${highest}`;
+    byId('driverSummary').textContent = drivers || 'No elevated drivers';
+    byId('generatedBadge').textContent = state.data?.generatedAt ? `Generated ${fmtDate(state.data.generatedAt)}` : 'Not generated';
+  }
+
+  function renderBannerAndWarnings() {
+    if (state.demoMode && state.loadError) {
+      showBanner(`Live API unavailable, so the interface is using demo data. Live error: ${state.loadError}. Run the Express server for live USL + NOAA/NWS + SPC data; GitHub Pages alone can only serve static files.`);
+    } else if (state.demoMode) {
+      showBanner('Demo mode is on. The dashboard is interactive, but match/weather values are sample data. Turn Demo mode off and refresh for live API data.');
+    } else {
+      showBanner('');
+    }
+
+    const warnings = state.data?.sourceWarnings || [];
+    const warningsBox = byId('sourceWarnings');
+    if (!warnings.length) {
+      warningsBox.classList.add('hidden');
+      warningsBox.innerHTML = '';
+      return;
+    }
+    warningsBox.classList.remove('hidden');
+    warningsBox.innerHTML = `<strong>Source and parser notes</strong><ul>${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>`;
+  }
+
+  function renderKpis() {
+    const counts = state.data?.summary?.counts || {};
+    byId('kpiGrid').innerHTML = RISK_ORDER.map(risk => `
+      <button class="kpi ${byId('riskFilter').value === risk ? 'active' : ''}" data-risk="${risk}" type="button">
+        <strong>${counts[risk] || 0}</strong>
+        <span>${RISK_EMOJI[risk]} ${risk}</span>
+      </button>
+    `).join('');
+  }
+
+  function renderExecutive() {
+    const summary = state.data?.summary || {};
+    byId('executiveText').textContent = summary.executive || 'No executive summary available.';
+  }
+
+  function chartColors() {
+    return {
+      Critical: cssVar('--critical'),
+      High: cssVar('--high'),
+      Moderate: cssVar('--moderate'),
+      Low: cssVar('--low'),
+      Unknown: cssVar('--unknown')
+    };
+  }
+
+  function renderChart() {
+    const counts = state.data?.summary?.counts || {};
+    const labels = RISK_ORDER;
+    const values = labels.map(label => counts[label] || 0);
+    const colors = chartColors();
+    const canvas = byId('riskChart');
+    const fallback = byId('chartFallback');
+
+    if (!window.Chart) {
+      canvas.classList.add('hidden');
+      fallback.classList.remove('hidden');
+      const max = Math.max(1, ...values);
+      fallback.innerHTML = labels.map((label, index) => `
+        <div class="bar-row">
+          <span>${escapeHtml(label)}</span>
+          <div class="bar-track"><div class="bar-fill ${escapeHtml(label)}" style="width: ${(values[index] / max) * 100}%"></div></div>
+          <strong>${values[index]}</strong>
+        </div>
+      `).join('');
+      return;
+    }
+
+    canvas.classList.remove('hidden');
+    fallback.classList.add('hidden');
+    if (state.chart) state.chart.destroy();
+
+    state.chart = new Chart(canvas, {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{
+          data: values,
+          backgroundColor: labels.map(label => colors[label]),
+          borderColor: 'rgba(8, 17, 31, 0.95)',
+          borderWidth: 3,
+          hoverOffset: 8
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '62%',
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: { color: cssVar('--muted'), boxWidth: 12, usePointStyle: true }
+          },
+          tooltip: {
+            callbacks: {
+              label: ctx => `${ctx.label}: ${ctx.formattedValue} match${Number(ctx.raw) === 1 ? '' : 'es'}`
+            }
+          }
+        },
+        onClick: (_event, elements) => {
+          if (!elements.length) return;
+          const risk = labels[elements[0].index];
+          byId('riskFilter').value = byId('riskFilter').value === risk ? 'all' : risk;
+          renderAll(false);
+        }
+      }
+    });
+  }
+
+  function groupByDay(matches) {
+    const groups = new Map();
+    matches.forEach(match => {
+      const day = fmtDay(match.startTime);
+      if (!groups.has(day)) groups.set(day, []);
+      groups.get(day).push(match);
+    });
+    return groups;
+  }
+
+  function renderTimeline() {
+    const target = byId('timeline');
+    if (!state.filtered.length) {
+      target.innerHTML = '<div class="empty-state">No matches match the current filters.</div>';
+      return;
+    }
+
+    const groups = groupByDay([...state.filtered].sort((a, b) => (Date.parse(a.startTime) || 0) - (Date.parse(b.startTime) || 0)));
+    let html = '';
+    groups.forEach((matches, day) => {
+      html += `<div class="timeline-day">${escapeHtml(day)}</div>`;
+      html += matches.map(match => `
+        <button class="timeline-item ${state.selectedMatchId === match.id ? 'selected' : ''}" data-select-match="${escapeHtml(match.id)}" type="button">
+          <span class="timeline-time">${escapeHtml(fmtShortTime(match.startTime))}</span>
+          <span class="timeline-match"><strong>${escapeHtml(match.match)}</strong><span>${escapeHtml(venueText(match))}</span></span>
+          ${riskPill(match.risk.level, match.risk.score)}
+        </button>
+      `).join('');
+    });
+    target.innerHTML = html;
+  }
+
+  function renderCards() {
+    const cards = byId('cards');
+    byId('cardCount').textContent = `${state.filtered.length} match${state.filtered.length === 1 ? '' : 'es'}`;
+    cards.innerHTML = '';
+
+    if (!state.filtered.length) {
+      cards.innerHTML = '<div class="empty-state">No matches match the current filters.</div>';
+      return;
+    }
+
+    const template = byId('cardTemplate');
+    state.filtered.forEach(match => {
+      const node = template.content.cloneNode(true);
+      const article = node.querySelector('.match-card');
+      article.dataset.matchId = match.id;
+      article.classList.toggle('selected', state.selectedMatchId === match.id);
+
+      const pill = node.querySelector('.risk-pill');
+      pill.classList.add(`risk-${riskLevel(match.risk.level)}`);
+      pill.textContent = `${RISK_EMOJI[match.risk.level]} ${match.risk.level} · ${match.risk.score}`;
+
+      node.querySelector('.league').textContent = match.league;
+      node.querySelector('.match-title').textContent = match.match;
+      node.querySelector('.venue-line').textContent = venueText(match);
+      node.querySelector('.kickoff-line').textContent = `${fmtDate(match.startTime)}${match.timeEstimated ? ' · estimated kickoff' : ''}`;
+      node.querySelector('.concern-line').textContent = concernText(match, 3);
+      node.querySelector('.driver-chips').innerHTML = driverChips(match.drivers);
+      node.querySelector('[data-card-select]').dataset.selectMatch = match.id;
+      node.querySelector('[data-card-copy]').dataset.copyMatch = match.id;
+      node.querySelector('.hourly-summary').textContent = match.weather?.hourlySummary || 'No NWS hourly summary available.';
+      node.querySelector('.metrics').innerHTML = metricItems(match).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+      node.querySelector('.alerts').innerHTML = alertItems(match.risk.alerts).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+      node.querySelector('.actions').innerHTML = (match.risk.recommendedActions || []).map(item => `<li>${escapeHtml(item)}</li>`).join('') || '<li>Standard matchday weather monitoring.</li>';
+      node.querySelector('.links').innerHTML = linkChips(match.links);
+      cards.appendChild(node);
+    });
+  }
+
+  function driverChips(drivers = []) {
+    if (!drivers.length) return '<span class="driver-chip">No elevated driver</span>';
+    return drivers.map(driver => `<span class="driver-chip">${escapeHtml(DRIVER_LABELS[driver] || driver)}</span>`).join('');
+  }
+
+  function renderTable() {
+    const tbody = byId('riskTable').querySelector('tbody');
+    byId('matchCount').textContent = `${state.filtered.length} match${state.filtered.length === 1 ? '' : 'es'}`;
+    if (!state.filtered.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No matches match the current filters.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = state.filtered.map(match => {
+      const driver = match.drivers[0] ? DRIVER_LABELS[match.drivers[0]] : 'Routine monitoring';
+      const selected = state.selectedMatchId === match.id ? 'selected' : '';
+      return `
+        <tr class="${selected}" data-select-match="${escapeHtml(match.id)}">
+          <td>${riskPill(match.risk.level, match.risk.score)}</td>
+          <td>${escapeHtml(match.league)}</td>
+          <td>${escapeHtml(fmtDate(match.startTime))}${match.timeEstimated ? '<br><span class="muted">estimated</span>' : ''}</td>
+          <td><strong>${escapeHtml(match.match)}</strong></td>
+          <td>${escapeHtml(venueText(match))}</td>
+          <td>${escapeHtml(driver)}<br><span class="muted">${escapeHtml(concernText(match, 1))}</span></td>
+          <td>${linkChips(match.links, true)}</td>
+          <td><button class="ghost small-btn" data-copy-match="${escapeHtml(match.id)}" type="button">Copy note</button></td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function buildLeagueActions(matches) {
+    const high = matches.filter(m => ['High', 'Critical'].includes(riskLevel(m.risk.level)));
+    const thunder = matches.filter(m => m.drivers.includes('lightning'));
+    const heat = matches.filter(m => m.drivers.includes('heat'));
+    const flood = matches.filter(m => m.drivers.includes('rain'));
+    const alerts = matches.filter(m => m.drivers.includes('alerts'));
+    const missingCoordinates = matches.filter(m => m.drivers.includes('coordinates'));
+    const out = [];
+
+    if (high.length) out.push(`Require weather-ops confirmation from ${high.slice(0, 8).map(m => m.homeTeam || m.match).join(', ')} before gates open.`);
+    if (thunder.length) out.push(`Activate enhanced lightning monitoring for ${thunder.length} match operation${thunder.length === 1 ? '' : 's'} with thunderstorm/lightning signal.`);
+    if (alerts.length) out.push(`Review active NWS alert details for ${alerts.length} venue point${alerts.length === 1 ? '' : 's'} and confirm referee escalation procedures.`);
+    if (heat.length) out.push(`Confirm heat mitigation at ${heat.slice(0, 8).map(m => cityText(m)).join(', ')}: hydration, cooling areas, AT staffing, and WBGT/heat-index checks.`);
+    if (flood.length) out.push('Complete field, drainage, broadcast, electrical, and ingress/egress checks at venues with heavy-rain or flood signal.');
+    if (missingCoordinates.length) out.push(`Update venue coordinates for ${missingCoordinates.length} match operation${missingCoordinates.length === 1 ? '' : 's'} before relying on automated weather risk.`);
+    out.push('Recheck NWS alerts, SPC outlooks, and radar at T-minus 3 hours, T-minus 90 minutes, gates-open, and halftime for moderate-or-higher venues.');
+    out.push('Keep referee, club operations, venue security, broadcast, and medical teams on one weather-decision escalation channel.');
+    return out;
+  }
+
+  function renderOps() {
+    const summary = state.data?.summary || {};
+    const elevated = [...(summary.activeMitigation || []), ...(summary.enhancedMonitoring || [])];
+    const target = byId('elevatedOps');
+
+    if (!elevated.length) {
+      target.className = 'action-list empty';
+      target.textContent = 'No elevated operations in the current data pull.';
+    } else {
+      target.className = 'action-list';
+      target.innerHTML = elevated.map(item => `
+        <div class="action-item">
+          <strong>${RISK_EMOJI[item.risk] || '⚪'} ${escapeHtml(item.match)} · ${escapeHtml(item.league)}</strong>
+          <ul>${(item.actions || []).slice(0, 4).map(action => `<li>${escapeHtml(action)}</li>`).join('') || '<li>Standard matchday monitoring.</li>'}</ul>
+        </div>
+      `).join('');
+    }
+
+    byId('leagueActions').innerHTML = buildLeagueActions(state.matches)
+      .map(action => `<li>${escapeHtml(action)}</li>`)
+      .join('');
+  }
+
+  function ensureMap() {
+    const fallback = byId('mapFallback');
+    const mapNode = byId('map');
+    if (!window.L) {
+      fallback.classList.remove('hidden');
+      fallback.textContent = 'Map library did not load. The table and cards remain fully interactive.';
+      mapNode.classList.add('hidden');
+      return false;
+    }
+
+    fallback.classList.add('hidden');
+    mapNode.classList.remove('hidden');
+    if (state.map) return true;
+
+    state.map = L.map('map', { scrollWheelZoom: true, worldCopyJump: true });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(state.map);
+    state.markerLayer = L.layerGroup().addTo(state.map);
+    state.map.setView([39.5, -98.35], 4);
     return true;
-  });
-}
+  }
 
-function sortMatches(matches) {
-  const { sortKey, sortDir } = state;
-  const dir = sortDir === 'asc' ? 1 : -1;
-  return [...matches].sort((a, b) => {
-    let av; let bv;
-    if (sortKey === 'risk') {
-      av = riskRank[a.risk.level] || 0;
-      bv = riskRank[b.risk.level] || 0;
-    } else if (sortKey === 'venue') {
-      av = `${a.venue?.venue || ''} ${a.venue?.city || ''}`;
-      bv = `${b.venue?.venue || ''} ${b.venue?.city || ''}`;
+  function markerHtml(match) {
+    const level = riskLevel(match.risk.level);
+    const letter = level === 'Critical' ? 'C' : level === 'High' ? 'H' : level === 'Moderate' ? 'M' : level === 'Low' ? 'L' : '?';
+    return `<div class="venue-marker ${level}">${letter}</div>`;
+  }
+
+  function renderMap() {
+    if (state.activeView !== 'map') return;
+    if (!ensureMap()) return;
+
+    state.markerLayer.clearLayers();
+    const withCoords = state.filtered.filter(match => Number.isFinite(match.venue?.lat) && Number.isFinite(match.venue?.lon));
+    byId('mapStatus').textContent = withCoords.length ? `${withCoords.length} mapped venue${withCoords.length === 1 ? '' : 's'}` : 'No mapped venues in filtered data';
+
+    if (!withCoords.length) {
+      state.map.setView([39.5, -98.35], 4);
+      state.map.invalidateSize();
+      return;
+    }
+
+    const bounds = [];
+    withCoords.forEach(match => {
+      const icon = L.divIcon({
+        className: '',
+        html: markerHtml(match),
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+        popupAnchor: [0, -14]
+      });
+      const latLng = [match.venue.lat, match.venue.lon];
+      bounds.push(latLng);
+      const popup = `
+        <strong>${escapeHtml(match.match)}</strong><br>
+        ${escapeHtml(fmtDate(match.startTime))}<br>
+        ${escapeHtml(venueText(match))}<br>
+        ${escapeHtml(match.risk.level)} · Score ${escapeHtml(match.risk.score)}
+      `;
+      const marker = L.marker(latLng, { icon }).bindPopup(popup);
+      marker.on('click', () => selectMatch(match.id, { scroll: false, switchView: false }));
+      state.markerLayer.addLayer(marker);
+    });
+
+    if (bounds.length === 1) {
+      state.map.setView(bounds[0], 9);
     } else {
-      av = a[sortKey] || '';
-      bv = b[sortKey] || '';
+      state.map.fitBounds(bounds, { padding: [34, 34], maxZoom: 7 });
     }
-    if (sortKey === 'startTime') {
-      av = Date.parse(av) || 0;
-      bv = Date.parse(bv) || 0;
+    window.setTimeout(() => state.map?.invalidateSize(), 80);
+  }
+
+  function selectedMatch() {
+    return state.matches.find(match => match.id === state.selectedMatchId) || state.filtered[0] || state.matches[0] || null;
+  }
+
+  function renderSelectedPanel() {
+    const panel = byId('selectedMatchPanel');
+    const match = selectedMatch();
+    if (!match) {
+      panel.innerHTML = '<p class="eyebrow small">Selected match</p><h2>No match selected</h2><p class="muted">No matches are currently loaded.</p>';
+      return;
     }
-    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
-    return String(av).localeCompare(String(bv)) * dir;
-  });
-}
 
-function renderKpis(summary) {
-  const counts = summary?.counts || {};
-  const items = [
-    ['Critical', counts.Critical || 0],
-    ['High', counts.High || 0],
-    ['Moderate', counts.Moderate || 0],
-    ['Low', counts.Low || 0],
-    ['Unknown', counts.Unknown || 0]
-  ];
-  el('kpis').innerHTML = items.map(([risk, count]) => `
-    <div class="kpi">
-      <strong>${count}</strong>
-      <span>${riskEmoji[risk]} ${risk}</span>
-    </div>
-  `).join('');
-}
-
-function renderWarnings(warnings = []) {
-  const box = el('sourceWarnings');
-  if (!warnings.length) {
-    box.classList.add('hidden');
-    box.innerHTML = '';
-    return;
+    panel.innerHTML = `
+      <p class="eyebrow small">Selected match</p>
+      <div class="selected-detail-card">
+        ${riskPill(match.risk.level, match.risk.score)}
+        <h2>${escapeHtml(match.match)}</h2>
+        <p><strong>League:</strong> ${escapeHtml(match.league)}</p>
+        <p><strong>Kickoff:</strong> ${escapeHtml(fmtDate(match.startTime))}${match.timeEstimated ? ' <span class="muted">estimated</span>' : ''}</p>
+        <p><strong>Venue:</strong> ${escapeHtml(venueText(match))}</p>
+        <p><strong>Primary concern:</strong> ${escapeHtml(concernText(match, 2))}</p>
+        <div class="driver-chips">${driverChips(match.drivers)}</div>
+        <h4>Forecast window</h4>
+        <p>${escapeHtml(match.weather?.hourlySummary || 'No NWS hourly summary available.')}</p>
+        <h4>Recommended actions</h4>
+        <ol>${(match.risk.recommendedActions || []).slice(0, 6).map(action => `<li>${escapeHtml(action)}</li>`).join('') || '<li>Standard matchday monitoring.</li>'}</ol>
+        <h4>Active alerts</h4>
+        <ul>${alertItems(match.risk.alerts).map(alert => `<li>${escapeHtml(alert)}</li>`).join('')}</ul>
+        <div class="links">${linkChips(match.links)}</div>
+        <div class="card-actions">
+          <button class="primary small-btn" data-copy-match="${escapeHtml(match.id)}" type="button">Copy ops note</button>
+        </div>
+      </div>
+    `;
   }
-  box.classList.remove('hidden');
-  box.innerHTML = `<strong>Source / parser notes</strong><ul>${warnings.map(w => `<li>${htmlEscape(w)}</li>`).join('')}</ul>`;
-}
 
-function renderElevated(summary) {
-  const elevated = [...(summary?.activeMitigation || []), ...(summary?.enhancedMonitoring || [])];
-  const target = el('elevatedOps');
-  if (!elevated.length) {
-    target.className = 'action-list empty';
-    target.textContent = 'No elevated operations in the current data pull.';
-    return;
+  function selectMatch(id, { scroll = true, switchView = false } = {}) {
+    if (!id) return;
+    state.selectedMatchId = id;
+    if (switchView) setActiveView('map');
+    renderTimeline();
+    renderCards();
+    renderTable();
+    renderSelectedPanel();
+    renderMap();
+
+    if (scroll) {
+      const card = $(`.match-card[data-match-id="${CSS.escape(id)}"]`);
+      if (card && state.activeView === 'overview') card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
   }
-  target.className = 'action-list';
-  target.innerHTML = elevated.map(item => `
-    <div class="action-item">
-      <strong>${riskEmoji[item.risk] || ''} ${htmlEscape(item.match)} · ${htmlEscape(item.league)}</strong>
-      <ul>${(item.actions || []).slice(0, 3).map(a => `<li>${htmlEscape(a)}</li>`).join('')}</ul>
-    </div>
-  `).join('');
-}
 
-function buildLeagueActions(matches) {
-  const high = matches.filter(m => ['High', 'Critical'].includes(m.risk.level));
-  const thunder = matches.filter(m => m.risk.metrics?.thunderstormSignal || /thunder|lightning/i.test((m.risk.concerns || []).join(' ')));
-  const heat = matches.filter(m => (m.risk.metrics?.heatIndexOrApparentF || m.risk.metrics?.tempMaxF || 0) >= 92 || /heat/i.test((m.risk.concerns || []).join(' ')));
-  const flood = matches.filter(m => /flood|heavy rain|drainage/i.test((m.risk.concerns || []).join(' ')));
-  const out = [];
-
-  if (high.length) out.push(`Require weather-ops confirmation from ${high.slice(0, 7).map(m => m.homeTeam).join(', ')} before gates open.`);
-  if (thunder.length) out.push(`Activate enhanced lightning monitoring for ${thunder.length} match operation${thunder.length === 1 ? '' : 's'} with thunderstorm/lightning signal.`);
-  if (heat.length) out.push(`Confirm heat mitigation at ${heat.slice(0, 7).map(m => m.venue?.city || m.homeTeam).join(', ')}: hydration, cooling areas, AT staffing, and WBGT/heat-index checks.`);
-  if (flood.length) out.push(`Complete field, drainage, broadcast, and ingress/egress checks at venues with heavy-rain or flood signal.`);
-  out.push('Recheck NWS alerts, SPC outlooks, and local radar at T-minus 3 hours, T-minus 90 minutes, and gates-open for all moderate-or-higher venues.');
-  out.push('Keep referee, club operations, venue security, broadcast, and medical teams on a single weather-decision escalation channel.');
-  return out;
-}
-
-function renderLeagueActions(matches) {
-  el('leagueActions').innerHTML = buildLeagueActions(matches).map(a => `<li>${htmlEscape(a)}</li>`).join('');
-}
-
-function renderTable(matches) {
-  const tbody = el('riskTable').querySelector('tbody');
-  tbody.innerHTML = matches.map(m => {
-    const concern = (m.risk.concerns || []).slice(0, 2).join('; ');
-    const venue = [m.venue?.venue, m.venue?.city, m.venue?.state].filter(Boolean).join(' / ');
-    return `<tr>
-      <td>${riskPill(m.risk.level)}</td>
-      <td>${htmlEscape(m.league)}</td>
-      <td>${htmlEscape(fmtDate(m.startTime))}${m.timeEstimated ? '<br><span class="muted">estimated time</span>' : ''}</td>
-      <td><strong>${htmlEscape(m.match)}</strong></td>
-      <td>${htmlEscape(venue || 'Venue TBD')}</td>
-      <td>${htmlEscape(concern)}</td>
-      <td>${linkChips(m.links, true)}</td>
-    </tr>`;
-  }).join('');
-  el('matchCount').textContent = `${matches.length} match${matches.length === 1 ? '' : 'es'}`;
-}
-
-function metricItems(metrics = {}) {
-  const items = [];
-  if (metrics.popMax != null) items.push(`PoP max: ${metrics.popMax}%`);
-  if (metrics.tempMaxF != null) items.push(`Temp max: ${metrics.tempMaxF}°F`);
-  if (metrics.heatIndexOrApparentF != null) items.push(`Heat/app. temp: ${metrics.heatIndexOrApparentF}°F`);
-  if (metrics.windMaxMph != null) items.push(`Wind/gust: ${metrics.windMaxMph} mph`);
-  items.push(`Thunderstorm signal: ${metrics.thunderstormSignal ? 'Yes' : 'No'}`);
-  if (metrics.heavyRainSignal) items.push('Heavy-rain signal: Yes');
-  return items;
-}
-
-function alertItems(alerts = []) {
-  if (!alerts.length) return ['No active NWS alerts for the venue point.'];
-  return alerts.slice(0, 5).map(a => `${a.event || 'Alert'}${a.severity ? ` (${a.severity})` : ''}: ${a.headline || ''}`);
-}
-
-function linkChips(links = {}, compact = false) {
-  const labels = [
-    ['sourceSchedule', 'USL schedule'],
-    ['nwsForecastPage', 'NWS forecast'],
-    ['nwsAlerts', 'NWS alerts'],
-    ['radar', 'Radar'],
-    ['spcOutlook', 'SPC']
-  ];
-  return labels
-    .filter(([key]) => links[key])
-    .slice(0, compact ? 3 : 5)
-    .map(([key, label]) => `<a class="link-chip" href="${htmlEscape(links[key])}" target="_blank" rel="noreferrer">${label}</a>`)
-    .join('');
-}
-
-function renderCards(matches) {
-  const tpl = el('cardTemplate');
-  const cards = el('cards');
-  cards.innerHTML = '';
-  for (const m of matches) {
-    const node = tpl.content.cloneNode(true);
-    node.querySelector('.risk-pill').classList.add(`risk-${m.risk.level}`);
-    node.querySelector('.risk-pill').textContent = `${riskEmoji[m.risk.level] || '⚪'} ${m.risk.level} · ${m.risk.score}`;
-    node.querySelector('.league').textContent = m.league;
-    node.querySelector('.match-title').textContent = m.match;
-    node.querySelector('.venue-line').textContent = [m.venue?.venue, m.venue?.city, m.venue?.state, m.venue?.precision ? `(${m.venue.precision})` : ''].filter(Boolean).join(' / ');
-    node.querySelector('.kickoff-line').textContent = `${fmtDate(m.startTime)}${m.timeEstimated ? ' · estimated kickoff time' : ''}`;
-    node.querySelector('.concern-line').textContent = (m.risk.concerns || []).slice(0, 3).join('; ');
-    node.querySelector('.hourly-summary').textContent = m.weather?.hourlySummary || 'No weather summary available.';
-    node.querySelector('.metrics').innerHTML = metricItems(m.risk.metrics).map(x => `<li>${htmlEscape(x)}</li>`).join('');
-    node.querySelector('.alerts').innerHTML = alertItems(m.risk.alerts).map(x => `<li>${htmlEscape(x)}</li>`).join('');
-    node.querySelector('.actions').innerHTML = (m.risk.recommendedActions || []).map(x => `<li>${htmlEscape(x)}</li>`).join('');
-    node.querySelector('.links').innerHTML = linkChips(m.links);
-    cards.appendChild(node);
+  function opsNote(match) {
+    const alerts = (match.risk.alerts || []).slice(0, 2).map(a => a.event).filter(Boolean).join(', ') || 'No active alerts listed';
+    return [
+      `${match.match} - ${match.league}`,
+      `Kickoff: ${fmtDate(match.startTime)}`,
+      `Venue: ${venueText(match)}`,
+      `Risk: ${match.risk.level} (${match.risk.score})`,
+      `Concern: ${concernText(match, 3)}`,
+      `Alerts: ${alerts}`,
+      `Actions: ${(match.risk.recommendedActions || []).slice(0, 4).join(' | ') || 'Standard matchday weather monitoring.'}`
+    ].join('\n');
   }
-}
 
-function populateLeagueFilter(matches) {
-  const select = el('leagueFilter');
-  const current = select.value;
-  const leagues = [...new Set(matches.map(m => m.league))].sort();
-  select.innerHTML = '<option value="all">All leagues</option>' + leagues.map(l => `<option value="${htmlEscape(l)}">${htmlEscape(l)}</option>`).join('');
-  select.value = leagues.includes(current) ? current : 'all';
-}
+  async function copyMatchNote(id) {
+    const match = state.matches.find(m => m.id === id);
+    if (!match) return;
+    const text = opsNote(match);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Operations note copied.');
+    } catch {
+      const area = document.createElement('textarea');
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+      toast('Operations note copied.');
+    }
+  }
 
-function render() {
-  if (!state.data) return;
-  const allMatches = state.data.matches || [];
-  populateLeagueFilter(allMatches);
-  const filtered = sortMatches(applyFilters(allMatches));
-  renderKpis(state.data.summary);
-  el('executiveText').textContent = state.data.summary?.executive || 'No executive summary available.';
-  renderWarnings(state.data.sourceWarnings || []);
-  renderElevated(state.data.summary || {});
-  renderLeagueActions(allMatches);
-  renderTable(filtered);
-  renderCards(filtered);
-  el('lastRefresh').textContent = new Date(state.data.generatedAt).toLocaleString();
-  const win = state.data.window;
-  el('windowLabel').textContent = win ? `${win.label}: ${fmtDate(win.from)} to ${fmtDate(win.to)}` : '—';
-}
+  async function copySummary() {
+    if (!state.data) return;
+    const counts = state.data.summary?.counts || {};
+    const text = [
+      'USL Match Weather Operations Dashboard',
+      `Window: ${fmtWindow(state.data.window)}`,
+      `Risk count: Critical ${counts.Critical || 0}, High ${counts.High || 0}, Moderate ${counts.Moderate || 0}, Low ${counts.Low || 0}, Unknown ${counts.Unknown || 0}`,
+      `Summary: ${state.data.summary?.executive || 'No executive summary available.'}`,
+      'Recommended actions:',
+      ...buildLeagueActions(state.matches).map((action, index) => `${index + 1}. ${action}`)
+    ].join('\n');
 
-function buildQuery(force = false) {
-  const params = new URLSearchParams();
-  const w = el('windowSelect').value;
-  if (w === 'custom') {
-    const from = el('fromDate').value;
-    const to = el('toDate').value;
-    if (from && to) {
-      params.set('from', new Date(from).toISOString());
-      params.set('to', new Date(to).toISOString());
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Executive summary copied.');
+    } catch {
+      toast('Could not access clipboard.', 'warning');
+    }
+  }
+
+  function csvCell(value) {
+    const text = String(value ?? '');
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  function exportCsv() {
+    const rows = [[
+      'Risk', 'Score', 'League', 'Kickoff', 'Match', 'Venue', 'City', 'State', 'Drivers', 'Concerns', 'Actions'
+    ]];
+    state.filtered.forEach(match => {
+      rows.push([
+        match.risk.level,
+        match.risk.score,
+        match.league,
+        fmtDate(match.startTime),
+        match.match,
+        match.venue?.venue || '',
+        match.venue?.city || '',
+        match.venue?.state || '',
+        match.drivers.map(d => DRIVER_LABELS[d] || d).join('; '),
+        (match.risk.concerns || []).join('; '),
+        (match.risk.recommendedActions || []).join('; ')
+      ]);
+    });
+    const csv = rows.map(row => row.map(csvCell).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `usl-weather-risks-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function renderAll(repopulate = true) {
+    if (!state.data) return;
+    if (repopulate) populateFilters(state.matches);
+    state.filtered = sortMatches(applyFilters(state.matches));
+    if (state.selectedMatchId && !state.matches.some(m => m.id === state.selectedMatchId)) {
+      state.selectedMatchId = state.filtered[0]?.id || state.matches[0]?.id || null;
+    }
+    if (!state.selectedMatchId) state.selectedMatchId = state.filtered[0]?.id || state.matches[0]?.id || null;
+
+    setStatus('ready');
+    renderBannerAndWarnings();
+    renderMeta();
+    renderKpis();
+    renderExecutive();
+    renderChart();
+    renderTimeline();
+    renderCards();
+    renderTable();
+    renderOps();
+    renderSelectedPanel();
+    renderMap();
+  }
+
+  function setActiveView(view) {
+    state.activeView = view;
+    $$('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.view === view));
+    $$('.view-panel').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === view));
+    if (view === 'map') {
+      renderMap();
+      window.setTimeout(() => state.map?.invalidateSize(), 80);
+    }
+  }
+
+  function clearFilters() {
+    byId('leagueFilter').value = 'all';
+    byId('riskFilter').value = 'all';
+    byId('driverFilter').value = 'all';
+    byId('searchBox').value = '';
+    renderAll(false);
+  }
+
+  function toggleCustomDates() {
+    const isCustom = byId('windowSelect').value === 'custom';
+    $$('.custom-date').forEach(node => node.classList.toggle('hidden', !isCustom));
+  }
+
+  function resetAutoRefresh() {
+    if (state.autoTimer) window.clearInterval(state.autoTimer);
+    state.autoTimer = null;
+    if (byId('autoRefresh').checked && !byId('demoToggle').checked) {
+      state.autoTimer = window.setInterval(() => loadDashboard(false), AUTO_REFRESH_MS);
+    }
+  }
+
+  function handleSort(sortKey) {
+    if (state.sortKey === sortKey) {
+      state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
     } else {
-      params.set('window', 'weekend');
+      state.sortKey = sortKey;
+      state.sortDir = sortKey === 'startTime' ? 'asc' : 'desc';
     }
-  } else {
-    params.set('window', w);
+    renderAll(false);
   }
-  if (force) params.set('refresh', 'true');
-  return params;
-}
 
-async function loadDashboard(force = false) {
-  const btn = el('refreshBtn');
-  btn.disabled = true;
-  btn.textContent = 'Refreshing…';
-  try {
-    const res = await fetch(`/api/dashboard?${buildQuery(force).toString()}`);
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    state.data = await res.json();
-    render();
-  } catch (err) {
-    el('executiveText').textContent = `Dashboard load failed: ${err.message}`;
-    console.error(err);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Refresh live data';
+  function wireEvents() {
+    byId('refreshBtn').addEventListener('click', () => loadDashboard(true));
+    byId('copySummaryBtn').addEventListener('click', copySummary);
+    byId('clearFiltersBtn').addEventListener('click', clearFilters);
+    byId('exportCsvBtn').addEventListener('click', exportCsv);
+
+    byId('windowSelect').addEventListener('change', () => {
+      toggleCustomDates();
+      loadDashboard(true);
+    });
+    byId('fromDate').addEventListener('change', () => loadDashboard(true));
+    byId('toDate').addEventListener('change', () => loadDashboard(true));
+    byId('demoToggle').addEventListener('change', () => loadDashboard(true));
+    byId('autoRefresh').addEventListener('change', resetAutoRefresh);
+
+    ['leagueFilter', 'riskFilter', 'driverFilter'].forEach(id => {
+      byId(id).addEventListener('change', () => renderAll(false));
+    });
+    byId('searchBox').addEventListener('input', () => renderAll(false));
+
+    $$('.tab').forEach(tab => {
+      tab.addEventListener('click', () => setActiveView(tab.dataset.view));
+    });
+
+    document.addEventListener('click', event => {
+      const kpi = event.target.closest('.kpi[data-risk]');
+      if (kpi) {
+        const risk = kpi.dataset.risk;
+        byId('riskFilter').value = byId('riskFilter').value === risk ? 'all' : risk;
+        renderAll(false);
+        return;
+      }
+
+      const sortHeader = event.target.closest('th[data-sort]');
+      if (sortHeader) {
+        handleSort(sortHeader.dataset.sort);
+        return;
+      }
+
+      const copyButton = event.target.closest('[data-copy-match]');
+      if (copyButton) {
+        event.stopPropagation();
+        copyMatchNote(copyButton.dataset.copyMatch);
+        return;
+      }
+
+      const selector = event.target.closest('[data-select-match]');
+      if (selector) {
+        selectMatch(selector.dataset.selectMatch, { switchView: false });
+      }
+    });
   }
-}
 
-function toggleCustomDates() {
-  const custom = el('windowSelect').value === 'custom';
-  document.querySelectorAll('.custom-date').forEach(node => node.classList.toggle('hidden', !custom));
-}
-
-function resetAutoRefresh() {
-  if (state.autoTimer) clearInterval(state.autoTimer);
-  if (el('autoRefresh').checked) {
-    state.autoTimer = setInterval(() => loadDashboard(false), 5 * 60 * 1000);
+  function setDefaultCustomDates() {
+    const friday = upcomingFridayBase();
+    const sunday = new Date(friday);
+    sunday.setDate(friday.getDate() + 2);
+    sunday.setHours(23, 59, 0, 0);
+    byId('fromDate').value = toDatetimeLocal(friday);
+    byId('toDate').value = toDatetimeLocal(sunday);
   }
-}
 
-el('refreshBtn').addEventListener('click', () => loadDashboard(true));
-el('windowSelect').addEventListener('change', () => { toggleCustomDates(); loadDashboard(true); });
-el('fromDate').addEventListener('change', () => loadDashboard(true));
-el('toDate').addEventListener('change', () => loadDashboard(true));
-el('leagueFilter').addEventListener('change', render);
-el('riskFilter').addEventListener('change', render);
-el('searchBox').addEventListener('input', render);
-el('autoRefresh').addEventListener('change', resetAutoRefresh);
+  function toDatetimeLocal(date) {
+    const pad = value => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
 
-document.querySelectorAll('th[data-sort]').forEach(th => {
-  th.addEventListener('click', () => {
-    const key = th.dataset.sort;
-    if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
-    else { state.sortKey = key; state.sortDir = key === 'startTime' ? 'asc' : 'desc'; }
-    render();
+  document.addEventListener('DOMContentLoaded', () => {
+    setDefaultCustomDates();
+    toggleCustomDates();
+    wireEvents();
+    loadDashboard(false);
   });
-});
+})();
 
-toggleCustomDates();
-resetAutoRefresh();
-loadDashboard(false);
+```
 
-`````
+## `public/demo-dashboard.json`
 
-## `data/team-aliases.json`
-
-`````json
-[
-  {"canonical":"Athletic Club Boise","aliases":["AC Boise","A.C. Boise","Athletic Club Boise"]},
-  {"canonical":"AV ALTA FC","aliases":["AV Alta","AV ALTA FC","AV Alta FC"]},
-  {"canonical":"Birmingham Legion FC","aliases":["Birmingham Legion FC","Birmingham Legion"]},
-  {"canonical":"Brooklyn FC","aliases":["Brooklyn FC"]},
-  {"canonical":"Carolina Ascent FC","aliases":["Carolina Ascent FC","Carolina Ascent"]},
-  {"canonical":"Charleston Battery","aliases":["Charleston Battery"]},
-  {"canonical":"Charlotte Independence","aliases":["Charlotte Independence"]},
-  {"canonical":"Chattanooga Red Wolves SC","aliases":["Chattanooga Red Wolves SC","Chattanooga Red Wolves"]},
-  {"canonical":"Colorado Springs Switchbacks FC","aliases":["Colorado Springs Switchbacks FC","Colorado Springs Switchbacks","Colo Springs Switchbacks FC","Colo Springs"]},
-  {"canonical":"Corpus Christi FC","aliases":["Corpus Christi FC","Corpus Christi"]},
-  {"canonical":"Dallas Trinity FC","aliases":["Dallas Trinity FC","Dallas Trinity"]},
-  {"canonical":"DC Power FC","aliases":["DC Power FC","DC Power Football Club","DC Power"]},
-  {"canonical":"Detroit City FC","aliases":["Detroit City FC","Detroit City"]},
-  {"canonical":"El Paso Locomotive FC","aliases":["El Paso Locomotive FC","El Paso Locomotive"]},
-  {"canonical":"FC Naples","aliases":["FC Naples","Naples"]},
-  {"canonical":"FC Tulsa","aliases":["FC Tulsa","Tulsa"]},
-  {"canonical":"Fort Lauderdale United FC","aliases":["Fort Lauderdale United FC","Fort Lauderdale United"]},
-  {"canonical":"Fort Wayne FC","aliases":["Fort Wayne FC"]},
-  {"canonical":"Forward Madison FC","aliases":["Forward Madison FC","Forward Madison"]},
-  {"canonical":"Greenville Triumph SC","aliases":["Greenville Triumph SC","Greenville Triumph"]},
-  {"canonical":"Hartford Athletic","aliases":["Hartford Athletic"]},
-  {"canonical":"Indy Eleven","aliases":["Indy Eleven"]},
-  {"canonical":"Las Vegas Lights FC","aliases":["Las Vegas Lights FC","Las Vegas Lights"]},
-  {"canonical":"Lexington SC","aliases":["Lexington SC"]},
-  {"canonical":"Loudoun United FC","aliases":["Loudoun United FC","Loudoun United"]},
-  {"canonical":"Louisville City FC","aliases":["Louisville City FC","Louisville City","LouCity"]},
-  {"canonical":"Miami FC","aliases":["Miami FC"]},
-  {"canonical":"Monterey Bay FC","aliases":["Monterey Bay FC","Monterey Bay"]},
-  {"canonical":"New Mexico United","aliases":["New Mexico United"]},
-  {"canonical":"New York Cosmos","aliases":["New York Cosmos","NY Cosmos"]},
-  {"canonical":"Oakland Roots SC","aliases":["Oakland Roots SC","Oakland Roots"]},
-  {"canonical":"One Knoxville SC","aliases":["One Knoxville SC","One Knoxville","One Knox SC","One Knox"]},
-  {"canonical":"Orange County SC","aliases":["Orange County SC","Orange County"]},
-  {"canonical":"Phoenix Rising FC","aliases":["Phoenix Rising FC","Phoenix Rising"]},
-  {"canonical":"Pittsburgh Riverhounds SC","aliases":["Pittsburgh Riverhounds SC","Pittsburgh Riverhounds"]},
-  {"canonical":"Portland Hearts of Pine","aliases":["Portland Hearts of Pine"]},
-  {"canonical":"Rhode Island FC","aliases":["Rhode Island FC","Rhode Island"]},
-  {"canonical":"Richmond Kickers","aliases":["Richmond Kickers"]},
-  {"canonical":"Sacramento Republic FC","aliases":["Sacramento Republic FC","Sacramento Republic"]},
-  {"canonical":"San Antonio FC","aliases":["San Antonio FC"]},
-  {"canonical":"Sarasota Paradise","aliases":["Sarasota Paradise"]},
-  {"canonical":"Sporting JAX","aliases":["Sporting JAX","Sporting Jax","Sporting Jacksonville"]},
-  {"canonical":"Spokane Velocity FC","aliases":["Spokane Velocity FC","Spokane Velocity"]},
-  {"canonical":"Tampa Bay Rowdies","aliases":["Tampa Bay Rowdies"]},
-  {"canonical":"Tampa Bay Sun FC","aliases":["Tampa Bay Sun FC","Tampa Bay Sun"]},
-  {"canonical":"Union Omaha","aliases":["Union Omaha"]},
-  {"canonical":"Westchester SC","aliases":["Westchester SC"]}
-]
-
-`````
-
-## `data/venue-cache.json`
-
-`````json
+```json
 {
-  "Athletic Club Boise": {
-    "venue":"Athletic Club Boise Soccer Stadium",
-    "city":"Boise",
-    "state":"ID",
-    "lat":43.6150,
-    "lon":-116.2023,
-    "precision":"city-fallback"
+  "generatedAt": "2026-06-24T12:00:00.000Z",
+  "meta": {
+    "demo": true,
+    "note": "Sample data for interface validation only. Use /api/dashboard for live USL + NOAA/NWS + SPC data."
   },
-  "AV ALTA FC": {
-    "venue":"Lancaster Municipal Stadium",
-    "city":"Lancaster",
-    "state":"CA",
-    "lat":34.6870,
-    "lon":-118.1542,
-    "precision":"city-fallback"
+  "window": {
+    "from": "2026-06-26T04:00:00.000Z",
+    "to": "2026-06-29T03:59:59.999Z",
+    "label": "Demo upcoming weekend"
   },
-  "Birmingham Legion FC": {
-    "venue":"Protective Stadium",
-    "city":"Birmingham",
-    "state":"AL",
-    "lat":33.5276,
-    "lon":-86.8115,
-    "precision":"venue"
+  "summary": {
+    "counts": {
+      "Critical": 0,
+      "High": 2,
+      "Moderate": 2,
+      "Low": 2,
+      "Unknown": 0
+    },
+    "executive": "Demo mode: highest operational focus is lightning readiness in Florida/Texas-style environments and heat mitigation in desert venues. Replace demo data with live /api/dashboard output for operational decisions.",
+    "activeMitigation": [
+      {
+        "id": "demo-miami-tampa",
+        "match": "Miami FC vs Tampa Bay Rowdies",
+        "league": "USL Championship",
+        "risk": "High",
+        "actions": [
+          "Start lightning monitoring at gates-open and confirm sheltering/PA script timing.",
+          "Confirm field drainage and broadcast cable protection before team arrival.",
+          "Set referee, venue, broadcast, and club ops on one weather escalation channel."
+        ]
+      },
+      {
+        "id": "demo-las-vegas-orange-county",
+        "match": "Las Vegas Lights FC vs Orange County SC",
+        "league": "USL Championship",
+        "risk": "High",
+        "actions": [
+          "Activate heat mitigation: WBGT/heat-index checks, cooling zones, ice towels, and extra medical staffing.",
+          "Review hydration breaks and player/staff heat illness response with medical lead.",
+          "Confirm shaded cooling locations for staff, officials, and ball crew."
+        ]
+      }
+    ],
+    "enhancedMonitoring": [
+      {
+        "id": "demo-tulsa-sacramento",
+        "match": "FC Tulsa vs Sacramento Republic FC",
+        "league": "USL Championship",
+        "risk": "Moderate",
+        "actions": [
+          "Monitor SPC/NWS outlook updates and nearby watches through kickoff.",
+          "Confirm lightning decision tree and shelter access before gates open."
+        ]
+      },
+      {
+        "id": "demo-corpus-sarasota",
+        "match": "Corpus Christi FC vs Sarasota Paradise",
+        "league": "USL League One",
+        "risk": "Moderate",
+        "actions": [
+          "Confirm hydration, cooling, AT staffing, and player/staff heat illness response.",
+          "Inspect field drainage and ingress/egress if showers build near kickoff."
+        ]
+      }
+    ]
   },
-  "Brooklyn FC": {
-    "venue":"Maimonides Park",
-    "city":"Brooklyn",
-    "state":"NY",
-    "lat":40.5749,
-    "lon":-73.9849,
-    "precision":"venue"
-  },
-  "Carolina Ascent FC": {
-    "venue":"American Legion Memorial Stadium",
-    "city":"Charlotte",
-    "state":"NC",
-    "lat":35.2197,
-    "lon":-80.8289,
-    "precision":"venue"
-  },
-  "Charleston Battery": {
-    "venue":"Ralph Lundy Field at Patriots Point",
-    "city":"Mount Pleasant",
-    "state":"SC",
-    "lat":32.7918,
-    "lon":-79.9075,
-    "precision":"venue"
-  },
-  "Charlotte Independence": {
-    "venue":"American Legion Memorial Stadium",
-    "city":"Charlotte",
-    "state":"NC",
-    "lat":35.2197,
-    "lon":-80.8289,
-    "precision":"venue"
-  },
-  "Chattanooga Red Wolves SC": {
-    "venue":"CHI Memorial Stadium",
-    "city":"East Ridge",
-    "state":"TN",
-    "lat":35.0005,
-    "lon":-85.2142,
-    "precision":"approximate"
-  },
-  "Colorado Springs Switchbacks FC": {
-    "venue":"Weidner Field",
-    "city":"Colorado Springs",
-    "state":"CO",
-    "lat":38.8318,
-    "lon":-104.8173,
-    "precision":"venue"
-  },
-  "Corpus Christi FC": {
-    "venue":"Cabaniss Athletic Complex",
-    "city":"Corpus Christi",
-    "state":"TX",
-    "lat":27.7010,
-    "lon":-97.4145,
-    "precision":"approximate"
-  },
-  "Dallas Trinity FC": {
-    "venue":"Cotton Bowl",
-    "city":"Dallas",
-    "state":"TX",
-    "lat":32.7797,
-    "lon":-96.7597,
-    "precision":"venue"
-  },
-  "DC Power FC": {
-    "venue":"Audi Field",
-    "city":"Washington",
-    "state":"DC",
-    "lat":38.8685,
-    "lon":-77.0128,
-    "precision":"venue"
-  },
-  "Detroit City FC": {
-    "venue":"Keyworth Stadium",
-    "city":"Hamtramck",
-    "state":"MI",
-    "lat":42.3973,
-    "lon":-83.0584,
-    "precision":"venue"
-  },
-  "El Paso Locomotive FC": {
-    "venue":"Southwest University Park",
-    "city":"El Paso",
-    "state":"TX",
-    "lat":31.7592,
-    "lon":-106.4915,
-    "precision":"venue"
-  },
-  "FC Naples": {
-    "venue":"Paradise Coast Sports Complex",
-    "city":"Naples",
-    "state":"FL",
-    "lat":26.2696,
-    "lon":-81.7337,
-    "precision":"approximate"
-  },
-  "FC Tulsa": {
-    "venue":"ONEOK Field",
-    "city":"Tulsa",
-    "state":"OK",
-    "lat":36.1590,
-    "lon":-95.9888,
-    "precision":"venue"
-  },
-  "Fort Lauderdale United FC": {
-    "venue":"Beyond Bancard Field",
-    "city":"Davie",
-    "state":"FL",
-    "lat":26.0820,
-    "lon":-80.2400,
-    "precision":"approximate"
-  },
-  "Fort Wayne FC": {
-    "venue":"Bishop D'Arcy Stadium",
-    "city":"Fort Wayne",
-    "state":"IN",
-    "lat":41.0800,
-    "lon":-85.1394,
-    "precision":"city-fallback"
-  },
-  "Forward Madison FC": {
-    "venue":"Breese Stevens Field",
-    "city":"Madison",
-    "state":"WI",
-    "lat":43.0832,
-    "lon":-89.3730,
-    "precision":"venue"
-  },
-  "Greenville Triumph SC": {
-    "venue":"GE Vernova Park",
-    "city":"Greenville",
-    "state":"SC",
-    "lat":34.8526,
-    "lon":-82.3940,
-    "precision":"city-fallback"
-  },
-  "Hartford Athletic": {
-    "venue":"Trinity Health Stadium",
-    "city":"Hartford",
-    "state":"CT",
-    "lat":41.7591,
-    "lon":-72.6735,
-    "precision":"venue"
-  },
-  "Indy Eleven": {
-    "venue":"Michael A. Carroll Stadium",
-    "city":"Indianapolis",
-    "state":"IN",
-    "lat":39.7737,
-    "lon":-86.1673,
-    "precision":"venue"
-  },
-  "Las Vegas Lights FC": {
-    "venue":"Cashman Field",
-    "city":"Las Vegas",
-    "state":"NV",
-    "lat":36.1795,
-    "lon":-115.1304,
-    "precision":"venue"
-  },
-  "Lexington SC": {
-    "venue":"Lexington SC Stadium",
-    "city":"Lexington",
-    "state":"KY",
-    "lat":38.0406,
-    "lon":-84.5037,
-    "precision":"city-fallback"
-  },
-  "Loudoun United FC": {
-    "venue":"Segra Field",
-    "city":"Leesburg",
-    "state":"VA",
-    "lat":39.1107,
-    "lon":-77.5640,
-    "precision":"venue"
-  },
-  "Louisville City FC": {
-    "venue":"Lynn Family Stadium",
-    "city":"Louisville",
-    "state":"KY",
-    "lat":38.2591,
-    "lon":-85.7436,
-    "precision":"venue"
-  },
-  "Miami FC": {
-    "venue":"Pitbull Stadium / Riccardo Silva Stadium",
-    "city":"Miami",
-    "state":"FL",
-    "lat":25.7526,
-    "lon":-80.3772,
-    "precision":"venue"
-  },
-  "Monterey Bay FC": {
-    "venue":"Cardinale Stadium",
-    "city":"Seaside",
-    "state":"CA",
-    "lat":36.6538,
-    "lon":-121.7994,
-    "precision":"venue"
-  },
-  "New Mexico United": {
-    "venue":"Rio Grande Credit Union Field at Isotopes Park",
-    "city":"Albuquerque",
-    "state":"NM",
-    "lat":35.0685,
-    "lon":-106.6295,
-    "precision":"venue"
-  },
-  "New York Cosmos": {
-    "venue":"Hinchliffe Stadium",
-    "city":"Paterson",
-    "state":"NJ",
-    "lat":40.9166,
-    "lon":-74.1710,
-    "precision":"venue"
-  },
-  "Oakland Roots SC": {
-    "venue":"Oakland Coliseum",
-    "city":"Oakland",
-    "state":"CA",
-    "lat":37.7516,
-    "lon":-122.2005,
-    "precision":"approximate"
-  },
-  "One Knoxville SC": {
-    "venue":"Covenant Health Park",
-    "city":"Knoxville",
-    "state":"TN",
-    "lat":35.9700,
-    "lon":-83.9200,
-    "precision":"city-fallback"
-  },
-  "Orange County SC": {
-    "venue":"Championship Soccer Stadium",
-    "city":"Irvine",
-    "state":"CA",
-    "lat":33.6501,
-    "lon":-117.7465,
-    "precision":"venue"
-  },
-  "Phoenix Rising FC": {
-    "venue":"Phoenix Rising Stadium",
-    "city":"Phoenix",
-    "state":"AZ",
-    "lat":33.4450,
-    "lon":-112.0380,
-    "precision":"approximate"
-  },
-  "Pittsburgh Riverhounds SC": {
-    "venue":"Highmark Stadium",
-    "city":"Pittsburgh",
-    "state":"PA",
-    "lat":40.4362,
-    "lon":-80.0107,
-    "precision":"venue"
-  },
-  "Portland Hearts of Pine": {
-    "venue":"Fitzpatrick Stadium",
-    "city":"Portland",
-    "state":"ME",
-    "lat":43.6570,
-    "lon":-70.2675,
-    "precision":"venue"
-  },
-  "Rhode Island FC": {
-    "venue":"Centreville Bank Stadium",
-    "city":"Pawtucket",
-    "state":"RI",
-    "lat":41.8787,
-    "lon":-71.3826,
-    "precision":"approximate"
-  },
-  "Richmond Kickers": {
-    "venue":"City Stadium",
-    "city":"Richmond",
-    "state":"VA",
-    "lat":37.5505,
-    "lon":-77.4870,
-    "precision":"venue"
-  },
-  "Sacramento Republic FC": {
-    "venue":"Heart Health Park",
-    "city":"Sacramento",
-    "state":"CA",
-    "lat":38.5935,
-    "lon":-121.4342,
-    "precision":"venue"
-  },
-  "San Antonio FC": {
-    "venue":"Toyota Field",
-    "city":"San Antonio",
-    "state":"TX",
-    "lat":29.5392,
-    "lon":-98.3956,
-    "precision":"venue"
-  },
-  "Sarasota Paradise": {
-    "venue":"Premier Sports Campus",
-    "city":"Bradenton",
-    "state":"FL",
-    "lat":27.4446,
-    "lon":-82.3590,
-    "precision":"approximate"
-  },
-  "Sporting JAX": {
-    "venue":"Hodges Stadium",
-    "city":"Jacksonville",
-    "state":"FL",
-    "lat":30.2715,
-    "lon":-81.5087,
-    "precision":"venue"
-  },
-  "Spokane Velocity FC": {
-    "venue":"ONE Spokane Stadium",
-    "city":"Spokane",
-    "state":"WA",
-    "lat":47.6605,
-    "lon":-117.4145,
-    "precision":"venue"
-  },
-  "Tampa Bay Rowdies": {
-    "venue":"Al Lang Stadium",
-    "city":"St. Petersburg",
-    "state":"FL",
-    "lat":27.7685,
-    "lon":-82.6331,
-    "precision":"venue"
-  },
-  "Tampa Bay Sun FC": {
-    "venue":"Suncoast Credit Union Field",
-    "city":"Tampa",
-    "state":"FL",
-    "lat":27.9626,
-    "lon":-82.4918,
-    "precision":"approximate"
-  },
-  "Union Omaha": {
-    "venue":"Morrison Stadium",
-    "city":"Omaha",
-    "state":"NE",
-    "lat":41.2653,
-    "lon":-95.9460,
-    "precision":"approximate"
-  },
-  "Westchester SC": {
-    "venue":"Memorial Field",
-    "city":"Mount Vernon",
-    "state":"NY",
-    "lat":40.9126,
-    "lon":-73.8357,
-    "precision":"approximate"
-  }
+  "sourceWarnings": [
+    "Demo fallback is active. These are not official fixtures or live weather observations.",
+    "Deploy the Node/Express server to use official USL schedule parsing and NOAA/NWS/SPC live data."
+  ],
+  "matches": [
+    {
+      "id": "demo-miami-tampa",
+      "league": "USL Championship",
+      "sourceId": "demo",
+      "sourceUrl": "https://www.uslchampionship.com/league-schedule",
+      "homeTeam": "Miami FC",
+      "awayTeam": "Tampa Bay Rowdies",
+      "match": "Miami FC vs Tampa Bay Rowdies",
+      "status": "Scheduled",
+      "startTime": "2026-06-26T23:00:00.000Z",
+      "timeEstimated": false,
+      "venue": {
+        "venue": "Pitbull Stadium",
+        "city": "Miami",
+        "state": "FL",
+        "lat": 25.7525,
+        "lon": -80.3770,
+        "precision": "demo"
+      },
+      "risk": {
+        "level": "High",
+        "score": 78,
+        "concerns": [
+          "Thunderstorms/lightning in NWS hourly forecast window",
+          "High precipitation probability: 70%",
+          "Heavy rain/flood wording in forecast"
+        ],
+        "recommendedActions": [
+          "Start lightning monitoring at gates-open and confirm 30/30 or league lightning protocol.",
+          "Inspect field drainage, broadcast positions, ingress/egress, and field-level electrical runs.",
+          "Run T-minus 90 and T-minus 45 weather huddles with referee, venue ops, and broadcast."
+        ],
+        "metrics": {
+          "popMax": 70,
+          "tempMaxF": 88,
+          "heatIndexOrApparentF": 96,
+          "humidityMax": 83,
+          "windMaxMph": 24,
+          "thunderstormSignal": true,
+          "heavyRainSignal": true
+        },
+        "alerts": [
+          {
+            "event": "Special Weather Statement",
+            "severity": "Moderate",
+            "urgency": "Expected",
+            "certainty": "Possible",
+            "headline": "Demo thunderstorm and lightning monitoring statement"
+          }
+        ],
+        "spc": {
+          "day": 1,
+          "url": "https://www.spc.noaa.gov/products/outlook/",
+          "category": "Thunderstorm",
+          "score": 12,
+          "error": null
+        }
+      },
+      "weather": {
+        "office": "MFL",
+        "hourlySummary": "Fri 6:00 PM: 88°F, showers and thunderstorms likely, PoP 70%, wind SE 12 mph | Fri 7:00 PM: 86°F, thunderstorms likely, PoP 70%, wind SE 10 mph",
+        "dailySummary": "Demo: humid with scattered to numerous storms during the evening window.",
+        "updateTime": "2026-06-24T12:00:00.000Z"
+      },
+      "links": {
+        "sourceSchedule": "https://www.uslchampionship.com/league-schedule",
+        "nwsForecastPage": "https://forecast.weather.gov/MapClick.php?lat=25.7525&lon=-80.3770",
+        "nwsAlerts": "https://api.weather.gov/alerts/active?point=25.7525,-80.3770",
+        "radar": "https://radar.weather.gov/",
+        "spcOutlook": "https://www.spc.noaa.gov/products/outlook/"
+      }
+    },
+    {
+      "id": "demo-las-vegas-orange-county",
+      "league": "USL Championship",
+      "sourceId": "demo",
+      "sourceUrl": "https://www.uslchampionship.com/league-schedule",
+      "homeTeam": "Las Vegas Lights FC",
+      "awayTeam": "Orange County SC",
+      "match": "Las Vegas Lights FC vs Orange County SC",
+      "status": "Scheduled",
+      "startTime": "2026-06-27T02:00:00.000Z",
+      "timeEstimated": false,
+      "venue": {
+        "venue": "Cashman Field",
+        "city": "Las Vegas",
+        "state": "NV",
+        "lat": 36.1791,
+        "lon": -115.1296,
+        "precision": "demo"
+      },
+      "risk": {
+        "level": "High",
+        "score": 72,
+        "concerns": [
+          "Significant heat signal near 106°F",
+          "Elevated heat illness risk for players, officials, staff, and fan-facing operations"
+        ],
+        "recommendedActions": [
+          "Activate heat mitigation: WBGT/heat-index checks, cooling zones, ice towels, extra medical staffing.",
+          "Confirm hydration, cooling, AT staffing, and player/staff heat illness response.",
+          "Review heat substitutions, shade/cooling locations, and post-match recovery procedures."
+        ],
+        "metrics": {
+          "popMax": 0,
+          "tempMaxF": 106,
+          "heatIndexOrApparentF": 106,
+          "humidityMax": 14,
+          "windMaxMph": 18,
+          "thunderstormSignal": false,
+          "heavyRainSignal": false
+        },
+        "alerts": [
+          {
+            "event": "Heat Advisory",
+            "severity": "Moderate",
+            "urgency": "Expected",
+            "certainty": "Likely",
+            "headline": "Demo heat advisory conditions for evening operations"
+          }
+        ],
+        "spc": null
+      },
+      "weather": {
+        "office": "VEF",
+        "hourlySummary": "Sat 7:00 PM: 104°F, clear, PoP 0%, wind S 12 mph | Sat 8:00 PM: 101°F, clear, PoP 0%, wind S 10 mph",
+        "dailySummary": "Demo: very hot and dry with slow evening cooling.",
+        "updateTime": "2026-06-24T12:00:00.000Z"
+      },
+      "links": {
+        "sourceSchedule": "https://www.uslchampionship.com/league-schedule",
+        "nwsForecastPage": "https://forecast.weather.gov/MapClick.php?lat=36.1791&lon=-115.1296",
+        "nwsAlerts": "https://api.weather.gov/alerts/active?point=36.1791,-115.1296",
+        "radar": "https://radar.weather.gov/",
+        "spcOutlook": "https://www.spc.noaa.gov/products/outlook/"
+      }
+    },
+    {
+      "id": "demo-tulsa-sacramento",
+      "league": "USL Championship",
+      "sourceId": "demo",
+      "sourceUrl": "https://www.uslchampionship.com/league-schedule",
+      "homeTeam": "FC Tulsa",
+      "awayTeam": "Sacramento Republic FC",
+      "match": "FC Tulsa vs Sacramento Republic FC",
+      "status": "Scheduled",
+      "startTime": "2026-06-27T23:30:00.000Z",
+      "timeEstimated": false,
+      "venue": {
+        "venue": "ONEOK Field",
+        "city": "Tulsa",
+        "state": "OK",
+        "lat": 36.1592,
+        "lon": -95.9885,
+        "precision": "demo"
+      },
+      "risk": {
+        "level": "Moderate",
+        "score": 54,
+        "concerns": [
+          "SPC Day 2 Marginal severe-weather outlook",
+          "Elevated precipitation probability: 45%",
+          "Breezy/gusty wind signal near 30 mph"
+        ],
+        "recommendedActions": [
+          "Monitor SPC outlook updates and nearby watches/mesoscale discussions through kickoff.",
+          "Confirm lightning decision tree, shelter access, and PA scripts before gates open.",
+          "Secure temporary structures, signage, and field boards if gusts trend higher."
+        ],
+        "metrics": {
+          "popMax": 45,
+          "tempMaxF": 86,
+          "heatIndexOrApparentF": 91,
+          "humidityMax": 70,
+          "windMaxMph": 30,
+          "thunderstormSignal": false,
+          "heavyRainSignal": false
+        },
+        "alerts": [],
+        "spc": {
+          "day": 2,
+          "url": "https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson",
+          "category": "Marginal",
+          "score": 20,
+          "error": null
+        }
+      },
+      "weather": {
+        "office": "TSA",
+        "hourlySummary": "Sat 6:00 PM: 86°F, partly cloudy, PoP 35%, wind S 18 mph | Sat 8:00 PM: 82°F, isolated storms possible, PoP 45%, gusts 30 mph",
+        "dailySummary": "Demo: warm, humid, and breezy with isolated storm potential nearby.",
+        "updateTime": "2026-06-24T12:00:00.000Z"
+      },
+      "links": {
+        "sourceSchedule": "https://www.uslchampionship.com/league-schedule",
+        "nwsForecastPage": "https://forecast.weather.gov/MapClick.php?lat=36.1592&lon=-95.9885",
+        "nwsAlerts": "https://api.weather.gov/alerts/active?point=36.1592,-95.9885",
+        "radar": "https://radar.weather.gov/",
+        "spcOutlook": "https://www.spc.noaa.gov/products/outlook/"
+      }
+    },
+    {
+      "id": "demo-corpus-sarasota",
+      "league": "USL League One",
+      "sourceId": "demo",
+      "sourceUrl": "https://www.uslleagueone.com/League-Schedule",
+      "homeTeam": "Corpus Christi FC",
+      "awayTeam": "Sarasota Paradise",
+      "match": "Corpus Christi FC vs Sarasota Paradise",
+      "status": "Scheduled",
+      "startTime": "2026-06-28T00:30:00.000Z",
+      "timeEstimated": false,
+      "venue": {
+        "venue": "Cabaniss Athletic Complex",
+        "city": "Corpus Christi",
+        "state": "TX",
+        "lat": 27.7010,
+        "lon": -97.4145,
+        "precision": "demo"
+      },
+      "risk": {
+        "level": "Moderate",
+        "score": 49,
+        "concerns": [
+          "Elevated heat signal near 98°F",
+          "Isolated shower/thunderstorm wording near the match window"
+        ],
+        "recommendedActions": [
+          "Confirm hydration, cooling, AT staffing, and player/staff heat illness response.",
+          "Start lightning monitoring at gates-open if storms build within the area.",
+          "Review field drainage and ingress/egress plans if shower coverage increases."
+        ],
+        "metrics": {
+          "popMax": 35,
+          "tempMaxF": 91,
+          "heatIndexOrApparentF": 98,
+          "humidityMax": 79,
+          "windMaxMph": 24,
+          "thunderstormSignal": true,
+          "heavyRainSignal": false
+        },
+        "alerts": [],
+        "spc": null
+      },
+      "weather": {
+        "office": "CRP",
+        "hourlySummary": "Sat 7:00 PM: 89°F, partly cloudy with isolated storms, PoP 30%, wind SE 18 mph | Sat 8:00 PM: 86°F, humid, PoP 35%",
+        "dailySummary": "Demo: humid evening with isolated convection possible.",
+        "updateTime": "2026-06-24T12:00:00.000Z"
+      },
+      "links": {
+        "sourceSchedule": "https://www.uslleagueone.com/League-Schedule",
+        "nwsForecastPage": "https://forecast.weather.gov/MapClick.php?lat=27.7010&lon=-97.4145",
+        "nwsAlerts": "https://api.weather.gov/alerts/active?point=27.7010,-97.4145",
+        "radar": "https://radar.weather.gov/",
+        "spcOutlook": "https://www.spc.noaa.gov/products/outlook/"
+      }
+    },
+    {
+      "id": "demo-hartford-pittsburgh",
+      "league": "USL Championship",
+      "sourceId": "demo",
+      "sourceUrl": "https://www.uslchampionship.com/league-schedule",
+      "homeTeam": "Hartford Athletic",
+      "awayTeam": "Pittsburgh Riverhounds SC",
+      "match": "Hartford Athletic vs Pittsburgh Riverhounds SC",
+      "status": "Scheduled",
+      "startTime": "2026-06-28T22:00:00.000Z",
+      "timeEstimated": false,
+      "venue": {
+        "venue": "Trinity Health Stadium",
+        "city": "Hartford",
+        "state": "CT",
+        "lat": 41.7595,
+        "lon": -72.6741,
+        "precision": "demo"
+      },
+      "risk": {
+        "level": "Low",
+        "score": 18,
+        "concerns": [
+          "No high-impact weather signal in current NWS/SPC data window"
+        ],
+        "recommendedActions": [
+          "Standard matchday weather monitoring with final radar/NWS alert check 2-3 hours before kickoff."
+        ],
+        "metrics": {
+          "popMax": 15,
+          "tempMaxF": 78,
+          "heatIndexOrApparentF": 80,
+          "humidityMax": 55,
+          "windMaxMph": 14,
+          "thunderstormSignal": false,
+          "heavyRainSignal": false
+        },
+        "alerts": [],
+        "spc": null
+      },
+      "weather": {
+        "office": "BOX",
+        "hourlySummary": "Sun 6:00 PM: 76°F, partly sunny, PoP 10%, wind NW 10 mph | Sun 8:00 PM: 71°F, partly cloudy, PoP 15%",
+        "dailySummary": "Demo: seasonable and mainly dry.",
+        "updateTime": "2026-06-24T12:00:00.000Z"
+      },
+      "links": {
+        "sourceSchedule": "https://www.uslchampionship.com/league-schedule",
+        "nwsForecastPage": "https://forecast.weather.gov/MapClick.php?lat=41.7595&lon=-72.6741",
+        "nwsAlerts": "https://api.weather.gov/alerts/active?point=41.7595,-72.6741",
+        "radar": "https://radar.weather.gov/",
+        "spcOutlook": "https://www.spc.noaa.gov/products/outlook/"
+      }
+    },
+    {
+      "id": "demo-spokane-knoxville",
+      "league": "USL League One",
+      "sourceId": "demo",
+      "sourceUrl": "https://www.uslleagueone.com/League-Schedule",
+      "homeTeam": "Spokane Velocity FC",
+      "awayTeam": "One Knoxville SC",
+      "match": "Spokane Velocity FC vs One Knoxville SC",
+      "status": "Scheduled",
+      "startTime": "2026-06-29T00:30:00.000Z",
+      "timeEstimated": false,
+      "venue": {
+        "venue": "ONE Spokane Stadium",
+        "city": "Spokane",
+        "state": "WA",
+        "lat": 47.6617,
+        "lon": -117.4260,
+        "precision": "demo"
+      },
+      "risk": {
+        "level": "Low",
+        "score": 15,
+        "concerns": [
+          "Cool and dry conditions; no high-impact weather signal in current data window"
+        ],
+        "recommendedActions": [
+          "Standard matchday weather monitoring with final radar/NWS alert check 2-3 hours before kickoff."
+        ],
+        "metrics": {
+          "popMax": 10,
+          "tempMaxF": 72,
+          "heatIndexOrApparentF": 72,
+          "humidityMax": 48,
+          "windMaxMph": 12,
+          "thunderstormSignal": false,
+          "heavyRainSignal": false
+        },
+        "alerts": [],
+        "spc": null
+      },
+      "weather": {
+        "office": "OTX",
+        "hourlySummary": "Sun 5:00 PM: 72°F, mostly sunny, PoP 5%, wind W 9 mph | Sun 7:00 PM: 68°F, clear, PoP 10%",
+        "dailySummary": "Demo: cool, dry, and low operational risk.",
+        "updateTime": "2026-06-24T12:00:00.000Z"
+      },
+      "links": {
+        "sourceSchedule": "https://www.uslleagueone.com/League-Schedule",
+        "nwsForecastPage": "https://forecast.weather.gov/MapClick.php?lat=47.6617&lon=-117.4260",
+        "nwsAlerts": "https://api.weather.gov/alerts/active?point=47.6617,-117.4260",
+        "radar": "https://radar.weather.gov/",
+        "spcOutlook": "https://www.spc.noaa.gov/products/outlook/"
+      }
+    }
+  ],
+  "sources": [
+    {
+      "league": "USL Championship",
+      "url": "https://www.uslchampionship.com/league-schedule"
+    },
+    {
+      "league": "USL League One",
+      "url": "https://www.uslleagueone.com/League-Schedule"
+    },
+    {
+      "league": "USL Super League",
+      "url": "https://www.gainbridgesuperleague.com/league-schedule/"
+    }
+  ]
 }
 
-`````
+```
+
+## `README.md`
+
+```markdown
+# USL Match Weather Risk Dashboard
+
+Interactive Node/Express dashboard that joins official USL schedule pages with NOAA/NWS forecasts, active NWS alerts, and SPC categorical severe-weather outlooks.
+
+## What changed in the interactive version
+
+The browser app is now a full single-page dashboard instead of a text-style report. It includes:
+
+- live refresh from `/api/dashboard`
+- demo fallback data when the live API is unavailable
+- filter controls for window, league, risk, weather driver, and search
+- clickable KPI cards
+- risk distribution chart
+- kickoff timeline
+- match cards with expandable forecast, alert, and action detail
+- sortable risk table
+- interactive Leaflet venue map
+- selected-match operations panel
+- CSV export
+- copyable executive summary and match-level operations notes
+
+## Run locally
+
+```bash
+npm install
+cp .env.example .env
+npm run install:browsers
+npm start
+```
+
+Open:
+
+```bash
+http://localhost:3000
+```
+
+Then edit `.env` and replace the placeholder NWS user agent with a real contact email or URL:
+
+```bash
+NWS_USER_AGENT="USLWeatherOpsDashboard/1.0 (you@example.com)"
+```
+
+## Important hosting note
+
+GitHub Pages can host the static front-end, but it cannot run the Node/Express backend. If you open the app on GitHub Pages, it will show the interactive demo fallback and a banner explaining that the live API is unavailable.
+
+For live USL schedule parsing plus NOAA/NWS/SPC pulls, deploy the Node app to a server platform such as Render, Railway, Fly.io, a VPS, or another Node-capable host.
+
+## Live data endpoints used by the backend
+
+- Official USL Championship schedule page
+- Official USL League One schedule page
+- Official Gainbridge Super League schedule page
+- `api.weather.gov/points/{lat},{lon}`
+- NWS hourly forecast, daily forecast, grid forecast data, and active alerts
+- SPC Day 1, Day 2, and Day 3 categorical outlook GeoJSON
+
+## Production checklist
+
+1. Confirm every venue coordinate in `data/venue-cache.json`.
+2. Set a real `NWS_USER_AGENT` in `.env` or host environment variables.
+3. Keep `ENABLE_PLAYWRIGHT=true` for schedule pages that require client-side rendering.
+4. Validate the schedule parser after USL or SportsEngine markup changes.
+5. Use the dashboard for operational triage, then confirm decisions with official NWS/SPC/radar sources.
+
+```
